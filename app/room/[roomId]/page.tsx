@@ -4,16 +4,23 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams } from "next/navigation";
 import { startSpeechRecognition, splitIntoSentences } from "@/lib/speech";
 import { AudioQueue } from "@/lib/audio-queue";
+interface RoomAvatar {
+  id: string;
+  name: string;
+  avatar_url: string;
+}
 
 interface Participant {
   id: string;
   name: string;
   avatar?: string;
   type: "human" | "ai";
+  token?: string;
 }
 
 interface Message {
   id: number;
+  senderId: string;
   sender: string;
   senderType: "human" | "ai";
   text: string;
@@ -35,198 +42,182 @@ export default function RoomPage() {
   const { roomId } = useParams<{ roomId: string }>();
   const [topic, setTopic] = useState("");
   const [user, setUser] = useState<{ name: string; avatar: string } | null>(null);
-  const [participants, setParticipants] = useState<Participant[]>([]);
+  const [aiParticipants, setAiParticipants] = useState<Participant[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [visibleMessages, setVisibleMessages] = useState<Message[]>([]);
   const [isListening, setIsListening] = useState(false);
   const [interimText, setInterimText] = useState("");
-  const [aiThinking, setAiThinking] = useState<string | null>(null); // AI id that's thinking
-  const [aiSpeakingText, setAiSpeakingText] = useState("");
+  const [thinkingAiId, setThinkingAiId] = useState<string | null>(null);
+  const [speakingAiId, setSpeakingAiId] = useState<string | null>(null);
+  const [aiStreamText, setAiStreamText] = useState("");
 
   const recognitionRef = useRef<ReturnType<typeof startSpeechRecognition>>(null);
   const audioQueueRef = useRef<AudioQueue>(new AudioQueue());
   const msgIdRef = useRef(0);
-  const sessionIdRef = useRef<string | undefined>(undefined);
+  const sessionMapRef = useRef<Record<string, string | undefined>>({});
 
-  // Init
   useEffect(() => {
     const raw = getCookie("sm_user");
     if (raw) {
-      try {
-        const u = JSON.parse(raw);
-        setUser(u);
-      } catch { /* ignore */ }
+      try { setUser(JSON.parse(raw)); } catch { /* */ }
     }
 
-    // Get topic from sessionStorage or use default
-    const roomData = sessionStorage.getItem(`room_${roomId}`);
-    if (roomData) {
-      const { topic: t } = JSON.parse(roomData);
-      setTopic(t);
-    } else {
-      setTopic("自由讨论");
-    }
+    // Load room from Supabase
+    fetch(`/api/rooms/${roomId}`)
+      .then((r) => r.json())
+      .then((room) => {
+        if (room.error) { setTopic("自由讨论"); return; }
+        setTopic(room.topic || "自由讨论");
+
+        const stored: RoomAvatar[] = room.avatar_participants || [];
+        const participants: Participant[] = stored.map((a) => ({
+          id: a.id,
+          name: a.name,
+          avatar: a.avatar_url,
+          type: "ai" as const,
+        }));
+        setAiParticipants(participants);
+
+        // Fetch tokens for each avatar
+        Promise.all(
+          stored.map(async (a) => {
+            const res = await fetch(`/api/avatars/token?id=${a.id}`);
+            const data = await res.json();
+            return { id: a.id, token: data.token as string };
+          })
+        ).then((tokens) => {
+          setAiParticipants((prev) =>
+            prev.map((p) => {
+              const t = tokens.find((tk) => tk.id === p.id);
+              return t ? { ...p, token: t.token } : p;
+            })
+          );
+        });
+      })
+      .catch(() => setTopic("自由讨论"));
   }, [roomId]);
 
-  // Set participants once user is loaded
-  useEffect(() => {
-    if (!user) return;
-    setParticipants([
-      { id: "me", name: user.name, avatar: user.avatar, type: "human" },
-      { id: "ai1", name: "AI 分身", type: "ai" },
-    ]);
-  }, [user]);
+  const askAIs = useCallback(async (allMessages: Message[]) => {
+    for (const ai of aiParticipants) {
+      if (!ai.token) continue;
 
-  // Fade out messages after 8 seconds
-  useEffect(() => {
-    setVisibleMessages(messages.slice(-6));
-  }, [messages]);
+      setThinkingAiId(ai.id);
+      setSpeakingAiId(null);
+      setAiStreamText("");
 
-  useEffect(() => {
-    if (visibleMessages.length === 0) return;
-    const timer = setTimeout(() => {
-      setVisibleMessages((prev) => prev.slice(1));
-    }, 8000);
-    return () => clearTimeout(timer);
-  }, [visibleMessages]);
+      const context = allMessages
+        .slice(-10)
+        .map((m) => `${m.sender}: ${m.text}`)
+        .join("\n");
 
-  // Ask AI to respond
-  const askAI = useCallback(async (allMessages: Message[]) => {
-    const token = getCookie("sm_token");
-    if (!token) return;
+      const prompt = `会议主题: ${topic}\n\n最近的对话:\n${context}\n\n请根据以上对话自然参与讨论。`;
 
-    const aiParticipant = participants.find((p) => p.type === "ai");
-    if (!aiParticipant) return;
+      try {
+        const res = await fetch("/api/chat/stream", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            message: prompt,
+            sessionId: sessionMapRef.current[ai.id],
+            systemPrompt: SYSTEM_PROMPT,
+            accessToken: ai.token,
+          }),
+        });
 
-    setAiThinking(aiParticipant.id);
-    setAiSpeakingText("");
+        if (!res.ok || !res.body) { setThinkingAiId(null); continue; }
 
-    // Build conversation context
-    const context = allMessages
-      .slice(-10)
-      .map((m) => `${m.sender}: ${m.text}`)
-      .join("\n");
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let fullText = "";
+        let buffer = "";
 
-    const prompt = `会议主题: ${topic}\n\n最近的对话:\n${context}\n\n请根据以上对话自然参与讨论。`;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
 
-    try {
-      const res = await fetch("/api/chat/stream", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: prompt,
-          sessionId: sessionIdRef.current,
-          systemPrompt: SYSTEM_PROMPT,
-          accessToken: token,
-        }),
-      });
-
-      if (!res.ok || !res.body) {
-        setAiThinking(null);
-        return;
-      }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let fullText = "";
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          if (line.startsWith("data: ")) {
-            const data = line.slice(6).trim();
-            if (data === "[DONE]") continue;
-            try {
-              const parsed = JSON.parse(data);
-              // Extract session ID if present
-              if (parsed.sessionId) {
-                sessionIdRef.current = parsed.sessionId;
-              }
-              // Extract text content
-              const chunk =
-                parsed.choices?.[0]?.delta?.content ||
-                parsed.content ||
-                parsed.text ||
-                "";
-              if (chunk) {
-                fullText += chunk;
-                setAiSpeakingText(fullText);
-                setAiThinking(null); // Stop thinking, start speaking
-              }
-            } catch {
-              // Not JSON, might be plain text
-              if (data && data !== "[DONE]") {
-                fullText += data;
-                setAiSpeakingText(fullText);
-                setAiThinking(null);
+          for (const line of lines) {
+            if (line.startsWith("data: ")) {
+              const data = line.slice(6).trim();
+              if (data === "[DONE]") continue;
+              try {
+                const parsed = JSON.parse(data);
+                if (parsed.sessionId) sessionMapRef.current[ai.id] = parsed.sessionId;
+                const chunk = parsed.choices?.[0]?.delta?.content || parsed.content || parsed.text || "";
+                if (chunk) {
+                  fullText += chunk;
+                  setAiStreamText(fullText);
+                  setThinkingAiId(null);
+                  setSpeakingAiId(ai.id);
+                }
+              } catch {
+                if (data && data !== "[DONE]") {
+                  fullText += data;
+                  setAiStreamText(fullText);
+                  setThinkingAiId(null);
+                  setSpeakingAiId(ai.id);
+                }
               }
             }
           }
         }
-      }
 
-      // Check for [PASS]
-      if (fullText.trim() === "[PASS]" || fullText.trim() === "") {
-        setAiThinking(null);
-        setAiSpeakingText("");
-        return;
-      }
-
-      // Add AI message
-      const aiMsg: Message = {
-        id: ++msgIdRef.current,
-        sender: aiParticipant.name,
-        senderType: "ai",
-        text: fullText,
-        timestamp: Date.now(),
-      };
-      setMessages((prev) => [...prev, aiMsg]);
-      setAiSpeakingText("");
-
-      // TTS - split into sentences and play
-      const sentences = splitIntoSentences(fullText);
-      for (const sentence of sentences) {
-        try {
-          const ttsRes = await fetch("/api/tts", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text: sentence, accessToken: token }),
-          });
-          const ttsData = await ttsRes.json();
-          if (ttsData.data?.audioUrl || ttsData.data?.url) {
-            audioQueueRef.current.enqueue(ttsData.data.audioUrl || ttsData.data.url);
-          }
-        } catch {
-          // TTS failed for this sentence, continue
+        if (fullText.trim() === "[PASS]" || fullText.trim() === "") {
+          setThinkingAiId(null);
+          setSpeakingAiId(null);
+          setAiStreamText("");
+          continue;
         }
-      }
-    } catch {
-      setAiThinking(null);
-      setAiSpeakingText("");
-    }
-  }, [participants, topic]);
 
-  // Toggle microphone
+        const aiMsg: Message = {
+          id: ++msgIdRef.current,
+          senderId: ai.id,
+          sender: ai.name,
+          senderType: "ai",
+          text: fullText,
+          timestamp: Date.now(),
+        };
+        setMessages((prev) => [...prev, aiMsg]);
+        allMessages = [...allMessages, aiMsg];
+        setSpeakingAiId(null);
+        setAiStreamText("");
+
+        // TTS with the avatar's own token
+        const sentences = splitIntoSentences(fullText);
+        for (const sentence of sentences) {
+          try {
+            const ttsRes = await fetch("/api/tts", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ text: sentence, accessToken: ai.token }),
+            });
+            const ttsData = await ttsRes.json();
+            const url = ttsData.data?.audioUrl || ttsData.data?.url;
+            if (url) audioQueueRef.current.enqueue(url);
+          } catch { /* continue */ }
+        }
+      } catch {
+        setThinkingAiId(null);
+        setSpeakingAiId(null);
+        setAiStreamText("");
+      }
+    }
+  }, [aiParticipants, topic]);
+
   const toggleMic = () => {
     if (isListening) {
       recognitionRef.current?.stop();
       setIsListening(false);
       return;
     }
-
     setIsListening(true);
     recognitionRef.current = startSpeechRecognition(
       (text, isFinal) => {
         if (isFinal && text.trim()) {
           const msg: Message = {
             id: ++msgIdRef.current,
+            senderId: "me",
             sender: user?.name || "Me",
             senderType: "human",
             text: text.trim(),
@@ -234,8 +225,7 @@ export default function RoomPage() {
           };
           setMessages((prev) => {
             const next = [...prev, msg];
-            // Trigger AI response
-            setTimeout(() => askAI(next), 500);
+            setTimeout(() => askAIs(next), 500);
             return next;
           });
           setInterimText("");
@@ -247,116 +237,78 @@ export default function RoomPage() {
     );
   };
 
-  // Position participants in a circle
-  const getPosition = (index: number, total: number) => {
-    const angle = (index / total) * 2 * Math.PI - Math.PI / 2;
-    const radius = Math.min(35, 25 + total * 3); // % of container
-    return {
-      left: `${50 + radius * Math.cos(angle)}%`,
-      top: `${50 + radius * Math.sin(angle)}%`,
-    };
+  const getAiPosition = (index: number, total: number) => {
+    const spacing = 100 / (total + 1);
+    return { left: `${spacing * (index + 1)}%` };
   };
 
-  // Find who's currently speaking
-  const speakingId = isListening ? "me" : aiSpeakingText ? "ai1" : null;
+  const getLatestMessage = (participantId: string) => {
+    return [...messages].reverse().find((m) => m.senderId === participantId);
+  };
 
   return (
-    <main className="h-screen w-screen overflow-hidden relative">
-      {/* Ambient glow */}
+    <main className="h-screen w-screen overflow-hidden relative bg-[#FEF3E2]">
       <div className="fixed inset-0 pointer-events-none">
-        <div className="absolute top-1/3 left-1/4 w-[500px] h-[500px] bg-[#9B5DE5]/5 rounded-full blur-[150px]" />
-        <div className="absolute bottom-1/4 right-1/3 w-[400px] h-[400px] bg-[#F4A261]/5 rounded-full blur-[120px]" />
+        <div className="absolute top-0 left-1/4 w-[400px] h-[400px] bg-[#9B5DE5]/4 rounded-full blur-[120px]" />
+        <div className="absolute top-1/4 right-1/4 w-[350px] h-[350px] bg-[#F4A261]/5 rounded-full blur-[100px]" />
       </div>
 
-      {/* Topic - minimal top */}
-      <div className="absolute top-6 left-0 right-0 text-center z-10">
-        <p className="text-[#FFF8F0]/25 text-xs tracking-widest uppercase">
-          {topic}
-        </p>
-        <p className="text-[#FFF8F0]/15 text-[10px] mt-1">
-          房间 {roomId}
-        </p>
+      {/* Topic bar */}
+      <div className="absolute top-0 left-0 right-0 z-20 px-5 py-3">
+        <p className="text-[#3D2C1E]/60 text-sm font-medium">{topic}</p>
+        <p className="text-[#3D2C1E]/25 text-[10px]">房间 {roomId} · {aiParticipants.length} 个分身</p>
       </div>
 
-      {/* Circle of participants */}
-      <div className="absolute inset-0 flex items-center justify-center">
-        <div className="relative w-[min(90vw,600px)] h-[min(90vw,600px)]">
-          {/* Center table glow */}
-          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-24 h-24 rounded-full bg-[#F4A261]/5 blur-xl" />
+      {/* No avatars hint */}
+      {aiParticipants.length === 0 && (
+        <div className="absolute top-1/3 left-0 right-0 text-center z-10">
+          <p className="text-[#3D2C1E]/20 text-sm">还没有分身参会</p>
+          <p className="text-[#3D2C1E]/15 text-xs mt-1">回首页选择分身后再创建会议</p>
+        </div>
+      )}
 
-          {participants.map((p, i) => {
-            const pos = getPosition(i, participants.length);
-            const isSpeaking = speakingId === p.id;
-            const isThinking = aiThinking === p.id;
-            const isAI = p.type === "ai";
-
-            // Find latest message from this participant
-            const latestMsg = visibleMessages.findLast((m) =>
-              (p.id === "me" && m.senderType === "human") ||
-              (isAI && m.senderType === "ai")
-            );
+      {/* AI participants */}
+      <div className="absolute top-16 left-0 right-0 px-8" style={{ height: "55%" }}>
+        <div className="relative w-full h-full">
+          {aiParticipants.map((ai, i) => {
+            const pos = getAiPosition(i, aiParticipants.length);
+            const isThinking = thinkingAiId === ai.id;
+            const isSpeaking = speakingAiId === ai.id;
+            const latestMsg = getLatestMessage(ai.id);
+            const showStream = isSpeaking && aiStreamText;
 
             return (
               <div
-                key={p.id}
-                className="absolute -translate-x-1/2 -translate-y-1/2 flex flex-col items-center gap-2"
-                style={pos}
+                key={ai.id}
+                className="absolute -translate-x-1/2 flex flex-col items-center"
+                style={{ left: pos.left, top: "15%" }}
               >
-                {/* Avatar */}
                 <div
                   className={`
-                    relative w-20 h-20 rounded-full flex items-center justify-center text-2xl font-bold
-                    transition-all duration-500
-                    ${isAI ? "bg-[#9B5DE5]/20 border-2 border-[#9B5DE5]/30" : "bg-[#F4A261]/20 border-2 border-[#F4A261]/30"}
-                    ${isSpeaking ? "animate-speaking scale-110" : ""}
-                    ${isThinking ? "animate-ai-glow" : ""}
-                    ${isAI ? "animate-breathe" : ""}
+                    w-16 h-16 rounded-full flex items-center justify-center text-xl font-bold overflow-hidden
+                    bg-[#9B5DE5]/15 border-2 transition-all duration-500
+                    ${isThinking ? "border-[#9B5DE5]/50 animate-ai-thinking" : ""}
+                    ${isSpeaking ? "border-[#9B5DE5]/60 animate-speaking scale-105" : "border-[#9B5DE5]/20"}
+                    ${!isThinking && !isSpeaking ? "animate-breathe" : ""}
                   `}
                 >
-                  {p.avatar ? (
-                    <img src={p.avatar} alt={p.name} className="w-full h-full rounded-full object-cover" />
+                  {ai.avatar ? (
+                    <img src={ai.avatar} alt={ai.name} className="w-full h-full rounded-full object-cover" />
                   ) : (
-                    <span className={isAI ? "text-[#9B5DE5]/70" : "text-[#F4A261]/70"}>
-                      {p.name[0]}
-                    </span>
-                  )}
-
-                  {/* Speaking indicator ring */}
-                  {isSpeaking && (
-                    <div className="absolute inset-0 rounded-full border-2 border-[#F4A261] animate-speaking" />
+                    <span className="text-[#9B5DE5]/60">{ai.name[0]}</span>
                   )}
                 </div>
+                <span className="text-[10px] text-[#9B5DE5]/50 mt-1.5">{ai.name}</span>
 
-                {/* Name */}
-                <span className={`text-xs ${isAI ? "text-[#9B5DE5]/50" : "text-[#FFF8F0]/30"}`}>
-                  {p.name}
-                </span>
-
-                {/* Thinking bubble */}
                 {isThinking && (
-                  <div className="absolute -top-8 bg-white/10 backdrop-blur-sm rounded-full px-3 py-1 text-xs text-[#FFF8F0]/50 animate-fade-in">
-                    ...
+                  <div className="mt-2 dot-pulse text-[#9B5DE5]/40 text-lg">
+                    <span>·</span><span>·</span><span>·</span>
                   </div>
                 )}
 
-                {/* Speech bubble - latest message */}
-                {latestMsg && (
-                  <div className="absolute top-full mt-3 max-w-[200px] bg-white/5 backdrop-blur-sm rounded-xl px-3 py-2 text-xs text-[#FFF8F0]/70 animate-fade-in text-center">
-                    {latestMsg.text.length > 80 ? latestMsg.text.slice(0, 80) + "..." : latestMsg.text}
-                  </div>
-                )}
-
-                {/* AI streaming text */}
-                {isAI && aiSpeakingText && !latestMsg && (
-                  <div className="absolute top-full mt-3 max-w-[200px] bg-white/5 backdrop-blur-sm rounded-xl px-3 py-2 text-xs text-[#9B5DE5]/70 animate-fade-in text-center">
-                    {aiSpeakingText.length > 80 ? aiSpeakingText.slice(0, 80) + "..." : aiSpeakingText}
-                  </div>
-                )}
-
-                {/* Human interim text */}
-                {p.id === "me" && interimText && (
-                  <div className="absolute top-full mt-3 max-w-[200px] bg-white/5 backdrop-blur-sm rounded-xl px-3 py-2 text-xs text-[#F4A261]/50 animate-fade-in text-center">
-                    {interimText}
+                {(showStream || latestMsg) && (
+                  <div className="mt-2 max-w-[320px] w-[280px] bg-white/60 backdrop-blur-sm rounded-2xl px-4 py-3 text-sm text-[#3D2C1E]/70 animate-fade-in leading-relaxed">
+                    {showStream ? aiStreamText : latestMsg?.text}
                   </div>
                 )}
               </div>
@@ -365,41 +317,60 @@ export default function RoomPage() {
         </div>
       </div>
 
-      {/* Mic button - bottom center */}
-      <div className="absolute bottom-12 left-0 right-0 flex justify-center z-10">
-        <button
-          onClick={toggleMic}
-          className={`
-            w-16 h-16 rounded-full flex items-center justify-center transition-all duration-300
-            ${isListening
-              ? "bg-[#E76F51] animate-pulse-glow scale-110"
-              : "bg-white/10 hover:bg-white/15"
-            }
-          `}
-        >
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            {isListening ? (
-              // Stop icon
-              <rect x="6" y="6" width="12" height="12" rx="2" />
-            ) : (
-              // Mic icon
-              <>
-                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
-                <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-                <line x1="12" y1="19" x2="12" y2="23" />
-                <line x1="8" y1="23" x2="16" y2="23" />
-              </>
-            )}
-          </svg>
-        </button>
-      </div>
+      {/* Human area */}
+      <div className="absolute bottom-0 left-0 right-0 z-10 flex flex-col items-center pb-8">
+        {(interimText || getLatestMessage("me")) && (
+          <div className="mb-4 max-w-[320px] bg-white/50 backdrop-blur-sm rounded-2xl px-4 py-2.5 text-sm text-[#3D2C1E]/60 animate-fade-in text-center">
+            {interimText || getLatestMessage("me")?.text}
+          </div>
+        )}
 
-      {/* Subtle hint */}
-      {messages.length === 0 && !isListening && (
-        <div className="absolute bottom-32 left-0 right-0 text-center">
-          <p className="text-[#FFF8F0]/15 text-xs">点击麦克风开始发言</p>
+        <div className="flex items-center gap-4">
+          <div
+            className={`
+              w-14 h-14 rounded-full flex items-center justify-center text-lg font-bold overflow-hidden
+              bg-[#F4A261]/15 border-2 transition-all duration-300
+              ${isListening ? "border-[#F4A261] animate-speaking scale-105" : "border-[#F4A261]/25"}
+            `}
+          >
+            {user?.avatar ? (
+              <img src={user.avatar} alt={user.name} className="w-full h-full rounded-full object-cover" />
+            ) : (
+              <span className="text-[#F4A261]/60">{user?.name?.[0] || "?"}</span>
+            )}
+          </div>
+
+          <button
+            onClick={toggleMic}
+            className={`
+              w-14 h-14 rounded-full flex items-center justify-center transition-all duration-300 shadow-lg
+              ${isListening
+                ? "bg-[#E76F51] text-white animate-pulse-glow scale-110 shadow-[#E76F51]/30"
+                : "bg-white/70 text-[#3D2C1E]/40 hover:bg-white hover:text-[#3D2C1E]/60 shadow-black/5"
+              }
+            `}
+          >
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              {isListening ? (
+                <rect x="6" y="6" width="12" height="12" rx="2" />
+              ) : (
+                <>
+                  <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                  <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                  <line x1="12" y1="19" x2="12" y2="23" />
+                  <line x1="8" y1="23" x2="16" y2="23" />
+                </>
+              )}
+            </svg>
+          </button>
+
+          <span className="text-xs text-[#3D2C1E]/30">{user?.name || ""}</span>
         </div>
-      )}
+
+        {messages.length === 0 && !isListening && (
+          <p className="mt-3 text-[#3D2C1E]/15 text-[11px]">点击麦克风开始发言</p>
+        )}
+      </div>
     </main>
   );
 }
