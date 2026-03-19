@@ -7,6 +7,17 @@ export async function GET(
 ) {
   const { roomId } = await params;
   const sb = getServiceSupabase();
+
+  // Auto-end stale rooms older than 6 hours
+  const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+  await sb
+    .from("rooms")
+    .update({ status: "ended", ended_at: new Date().toISOString() })
+    .eq("id", roomId)
+    .eq("status", "active")
+    .is("ended_at", null)
+    .lt("started_at", sixHoursAgo);
+
   const { data, error } = await sb
     .from("rooms")
     .select("*")

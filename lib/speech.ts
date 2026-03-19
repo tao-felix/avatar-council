@@ -1,4 +1,4 @@
-// Web Speech API wrapper for STT
+// Web Speech API wrapper for STT + MediaRecorder for audio capture
 
 type SpeechCallback = (text: string, isFinal: boolean) => void;
 
@@ -33,4 +33,36 @@ export function splitIntoSentences(text: string): string[] {
   return text
     .split(/(?<=[。！？.!?])\s*/)
     .filter((s) => s.trim().length > 0);
+}
+
+// MediaRecorder wrapper for capturing human audio
+export class AudioRecorder {
+  private mediaRecorder: MediaRecorder | null = null;
+  private chunks: Blob[] = [];
+  private stream: MediaStream | null = null;
+
+  async start() {
+    this.chunks = [];
+    this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    this.mediaRecorder = new MediaRecorder(this.stream, { mimeType: "audio/webm;codecs=opus" });
+    this.mediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) this.chunks.push(e.data);
+    };
+    this.mediaRecorder.start();
+  }
+
+  stop(): Promise<Blob> {
+    return new Promise((resolve) => {
+      if (!this.mediaRecorder || this.mediaRecorder.state === "inactive") {
+        resolve(new Blob(this.chunks, { type: "audio/webm" }));
+        return;
+      }
+      this.mediaRecorder.onstop = () => {
+        const blob = new Blob(this.chunks, { type: "audio/webm" });
+        this.stream?.getTracks().forEach((t) => t.stop());
+        resolve(blob);
+      };
+      this.mediaRecorder.stop();
+    });
+  }
 }

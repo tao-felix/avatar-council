@@ -6,7 +6,7 @@ export async function GET() {
   const sb = getServiceSupabase();
   const { data, error } = await sb
     .from("avatars")
-    .select("id, name, avatar_url, route, likes, created_at")
+    .select("id, name, avatar_url, route, likes, bio, created_at")
     .order("likes", { ascending: false })
     .order("created_at", { ascending: true });
 

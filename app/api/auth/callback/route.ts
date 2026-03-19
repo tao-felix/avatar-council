@@ -34,6 +34,7 @@ export async function GET(req: NextRequest) {
         name: user.name || "User",
         avatar_url: user.avatarUrl || user.avatar || "",
         route: user.route || "",
+        bio: user.bio || user.selfIntroduction || "",
         access_token: accessToken,
         updated_at: new Date().toISOString(),
       },
