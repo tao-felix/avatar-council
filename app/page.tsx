@@ -24,6 +24,7 @@ interface RoomInfo {
   status: string;
   started_at: string;
   ended_at: string | null;
+  is_public: boolean;
   avatar_participants: { id: string; name: string; avatar_url: string }[];
   human_participants: { name: string; avatar: string }[];
 }
@@ -53,8 +54,10 @@ export default function Home() {
   const [likedIds, setLikedIds] = useState<Set<string>>(new Set());
   const [creating, setCreating] = useState(false);
   const [rooms, setRooms] = useState<RoomInfo[]>([]);
+  const [publicRooms, setPublicRooms] = useState<RoomInfo[]>([]);
   const [roomsLoading, setRoomsLoading] = useState(true);
-  const [showMyRooms, setShowMyRooms] = useState(false);
+  const [roomTab, setRoomTab] = useState<"discover" | "my">("discover");
+  const [isPublicRoom, setIsPublicRoom] = useState(true);
   const [topicFocused, setTopicFocused] = useState(false);
 
   useEffect(() => {
@@ -69,9 +72,14 @@ export default function Home() {
       .catch(() => {})
       .finally(() => setLoading(false));
 
-    fetch("/api/rooms")
-      .then((r) => r.json())
-      .then((data) => { if (Array.isArray(data)) setRooms(data); })
+    Promise.all([
+      fetch("/api/rooms").then((r) => r.json()),
+      fetch("/api/rooms?public=true").then((r) => r.json()),
+    ])
+      .then(([allData, pubData]) => {
+        if (Array.isArray(allData)) setRooms(allData);
+        if (Array.isArray(pubData)) setPublicRooms(pubData);
+      })
       .catch(() => {})
       .finally(() => setRoomsLoading(false));
   }, []);
@@ -138,6 +146,7 @@ export default function Home() {
           createdBy: user?.name || "Host",
           avatarParticipants: selectedAvatars.map((a) => ({ id: a.id, name: a.name, avatar_url: a.avatar_url })),
           humanParticipants: user ? [{ name: user.name, avatar: user.avatar }] : [],
+          isPublic: isPublicRoom,
         }),
       });
       router.push(`/room/${roomId}`);
@@ -404,6 +413,20 @@ export default function Home() {
                       </div>
                     )}
 
+                    <div className="flex items-center px-1">
+                      <button
+                        onClick={() => setIsPublicRoom(!isPublicRoom)}
+                        className="flex items-center gap-1.5 text-[10px] text-[#3D2C1E]/30 hover:text-[#3D2C1E]/50 transition-colors"
+                      >
+                        <div className={`w-3.5 h-3.5 rounded border-[1.5px] flex items-center justify-center transition-colors ${isPublicRoom ? "bg-[#9B5DE5] border-[#9B5DE5]" : "border-[#3D2C1E]/15"}`}>
+                          {isPublicRoom && (
+                            <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
+                          )}
+                        </div>
+                        公开房间
+                      </button>
+                    </div>
+
                     <button
                       onClick={createRoom}
                       disabled={!topic.trim() || creating}
@@ -453,7 +476,7 @@ export default function Home() {
         {/* Scroll hint */}
         {user && rooms.length > 0 && (
           <div className="absolute bottom-8 flex flex-col items-center animate-bounce-slow">
-            <span className="text-[#3D2C1E]/20 text-[10px] mb-1">查看历史会议</span>
+            <span className="text-[#3D2C1E]/20 text-[10px] mb-1">发现更多讨论</span>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-[#3D2C1E]/15">
               <polyline points="6 9 12 15 18 9" />
             </svg>
@@ -469,14 +492,14 @@ export default function Home() {
               <div className="flex-1 h-px bg-[#3D2C1E]/6" />
               <div className="flex items-center gap-1.5">
                 <button
-                  onClick={() => setShowMyRooms(false)}
-                  className={`text-[11px] font-medium px-2 py-0.5 rounded-full transition-colors ${!showMyRooms ? "bg-[#9B5DE5]/10 text-[#9B5DE5]/70" : "text-[#3D2C1E]/25 hover:text-[#3D2C1E]/40"}`}
+                  onClick={() => setRoomTab("discover")}
+                  className={`text-[11px] font-medium px-2 py-0.5 rounded-full transition-colors ${roomTab === "discover" ? "bg-[#9B5DE5]/10 text-[#9B5DE5]/70" : "text-[#3D2C1E]/25 hover:text-[#3D2C1E]/40"}`}
                 >
-                  全部
+                  发现
                 </button>
                 <button
-                  onClick={() => setShowMyRooms(true)}
-                  className={`text-[11px] font-medium px-2 py-0.5 rounded-full transition-colors ${showMyRooms ? "bg-[#9B5DE5]/10 text-[#9B5DE5]/70" : "text-[#3D2C1E]/25 hover:text-[#3D2C1E]/40"}`}
+                  onClick={() => setRoomTab("my")}
+                  className={`text-[11px] font-medium px-2 py-0.5 rounded-full transition-colors ${roomTab === "my" ? "bg-[#9B5DE5]/10 text-[#9B5DE5]/70" : "text-[#3D2C1E]/25 hover:text-[#3D2C1E]/40"}`}
                 >
                   我的
                 </button>
@@ -485,13 +508,15 @@ export default function Home() {
             </div>
 
             {(() => {
-              const filteredRooms = rooms.filter((room) => {
-                if (!showMyRooms || !user) return true;
-                return room.created_by === user.name || room.human_participants.some((h) => h.name === user.name);
-              });
+              const filteredRooms = roomTab === "discover"
+                ? publicRooms
+                : rooms.filter((room) => {
+                    if (!user) return false;
+                    return room.created_by === user.name || room.human_participants.some((h) => h.name === user.name);
+                  });
 
               if (roomsLoading) return <p className="text-[#3D2C1E]/20 text-xs text-center py-8">加载中...</p>;
-              if (filteredRooms.length === 0) return <p className="text-[#3D2C1E]/20 text-xs text-center py-8">{showMyRooms ? "还没有你参与的讨论" : "还没有会议记录"}</p>;
+              if (filteredRooms.length === 0) return <p className="text-[#3D2C1E]/20 text-xs text-center py-8">{roomTab === "my" ? "还没有你参与的讨论" : "暂无公开讨论"}</p>;
 
               return (
               <div className="space-y-2.5">

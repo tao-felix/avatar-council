@@ -90,11 +90,11 @@ export default function ReplayPage() {
     return { start, end, duration: Math.max(end - start, 1) };
   })();
 
+  // Progress by message index (uniform spacing, not time-based)
   const getProgress = (idx: number) => {
-    if (messages.length === 0 || idx < 0) return 0;
+    if (messages.length <= 1 || idx < 0) return 0;
     if (idx >= messages.length) return 1;
-    const t = new Date(messages[idx].created_at).getTime();
-    return (t - timeRange.start) / timeRange.duration;
+    return idx / (messages.length - 1);
   };
 
   const getReadingMs = (content: string) => {
@@ -159,9 +159,14 @@ export default function ReplayPage() {
     if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
   };
 
-  const jumpTo = (idx: number) => {
+  const jumpTo = (idx: number, autoPlay = false) => {
     pause();
     setCurrentIdx(idx);
+    if (autoPlay && idx >= 0 && idx < messages.length) {
+      setIsPlaying(true);
+      playingRef.current = true;
+      playMessage(idx);
+    }
   };
 
   const jumpToParticipant = (senderId: string, senderType: "human" | "ai") => {
@@ -181,14 +186,16 @@ export default function ReplayPage() {
   const handleProgressClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
     const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    const targetTime = timeRange.start + pct * timeRange.duration;
-    let closest = 0;
-    let minDiff = Infinity;
-    messages.forEach((m, i) => {
-      const diff = Math.abs(new Date(m.created_at).getTime() - targetTime);
-      if (diff < minDiff) { minDiff = diff; closest = i; }
-    });
-    jumpTo(closest);
+    const idx = Math.round(pct * (messages.length - 1));
+    jumpTo(Math.max(0, Math.min(idx, messages.length - 1)));
+  };
+
+  const goPrev = () => {
+    if (currentIdx > 0) jumpTo(currentIdx - 1, true);
+  };
+
+  const goNext = () => {
+    if (currentIdx < messages.length - 1) jumpTo(currentIdx + 1, true);
   };
 
   const getAiPosition = (index: number, total: number) => {
@@ -226,7 +233,6 @@ export default function ReplayPage() {
 
   const aiParticipants = room.avatar_participants;
   const humanParticipants = room.human_participants;
-  const [copied, setCopied] = useState(false);
 
   const copyShareLink = () => {
     const url = window.location.href;
@@ -253,20 +259,12 @@ export default function ReplayPage() {
             房间 {roomId} · {aiParticipants.length} 个分身
           </p>
         </div>
-        <div className="flex items-center gap-2 mt-0.5">
-          <button
-            onClick={copyShareLink}
-            className="px-2 py-0.5 rounded-full bg-white/50 hover:bg-white/70 text-[10px] text-[#3D2C1E]/40 font-medium transition-colors"
-          >
-            {copied ? "Copied!" : "Share"}
-          </button>
-          <button
-            onClick={() => setSpeed((s) => s >= 2 ? 0.5 : s + 0.5)}
-            className="px-2 py-0.5 rounded-full bg-white/50 hover:bg-white/70 text-[10px] text-[#3D2C1E]/40 font-medium transition-colors"
-          >
-            {speed}x
-          </button>
-        </div>
+        <button
+          onClick={copyShareLink}
+          className="shrink-0 mt-0.5 px-2.5 py-1 rounded-full bg-white/50 hover:bg-white/70 text-[10px] text-[#3D2C1E]/40 font-medium transition-colors"
+        >
+          {copied ? "Copied!" : "Share"}
+        </button>
       </div>
 
       {/* AI participants — same layout as room */}
@@ -347,29 +345,6 @@ export default function ReplayPage() {
             );
           })}
 
-          {/* Play/Pause button */}
-          <button
-            onClick={isPlaying ? pause : play}
-            className={`
-              w-14 h-14 rounded-full flex items-center justify-center transition-all duration-300 shadow-lg
-              ${isPlaying
-                ? "bg-[#E76F51] text-white animate-pulse-glow scale-110 shadow-[#E76F51]/30"
-                : "bg-white/70 text-[#3D2C1E]/40 hover:bg-white hover:text-[#3D2C1E]/60 shadow-black/5"
-              }
-            `}
-          >
-            {isPlaying ? (
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
-                <rect x="6" y="4" width="4" height="16" rx="1" />
-                <rect x="14" y="4" width="4" height="16" rx="1" />
-              </svg>
-            ) : (
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
-                <polygon points="6,3 20,12 6,21" />
-              </svg>
-            )}
-          </button>
-
           {humanParticipants.length === 1 && (
             <span className="text-xs text-[#3D2C1E]/30">{humanParticipants[0].name}</span>
           )}
@@ -380,31 +355,27 @@ export default function ReplayPage() {
         )}
       </div>
 
-      {/* Progress bar — fixed at bottom */}
+      {/* Playback controls — fixed at bottom */}
       {messages.length > 0 && (
-        <div className="absolute bottom-0 left-0 right-0 z-20 px-5 pb-3 pt-1">
-          <div className="max-w-xl mx-auto">
+        <div className="absolute bottom-0 left-0 right-0 z-20 px-5 pb-4 pt-2">
+          <div className="max-w-2xl mx-auto">
             {/* Progress track with avatar markers */}
             <div
-              className="relative h-8 cursor-pointer group"
+              className="relative h-8 cursor-pointer group mb-2"
               onClick={handleProgressClick}
             >
-              {/* Track background */}
               <div className="absolute top-1/2 -translate-y-1/2 left-0 right-0 h-1 bg-[#3D2C1E]/8 rounded-full overflow-hidden">
                 <div
                   className="h-full bg-gradient-to-r from-[#9B5DE5]/40 to-[#F4A261]/40 rounded-full transition-all duration-300"
                   style={{ width: `${getProgress(currentIdx) * 100}%` }}
                 />
               </div>
-
-              {/* Avatar markers */}
               {messages.map((msg, idx) => {
                 const pos = getProgress(idx) * 100;
                 const isCurrent = idx === currentIdx;
                 const isHuman = msg.sender_type === "human";
                 const p = getParticipant(msg);
                 const avatarUrl = isHuman ? (p as { avatar?: string })?.avatar : (p as { avatar_url?: string })?.avatar_url;
-
                 return (
                   <div
                     key={msg.id}
@@ -412,7 +383,7 @@ export default function ReplayPage() {
                       isCurrent ? "scale-150 z-10" : "hover:scale-125"
                     }`}
                     style={{ left: `${pos}%` }}
-                    onClick={(e) => { e.stopPropagation(); jumpTo(idx); }}
+                    onClick={(e) => { e.stopPropagation(); jumpTo(idx, true); }}
                   >
                     <div
                       className="w-4 h-4 rounded-full overflow-hidden flex items-center justify-center"
@@ -434,16 +405,56 @@ export default function ReplayPage() {
               })}
             </div>
 
-            {/* Time indicator */}
-            <div className="flex items-center justify-between text-[9px] text-[#3D2C1E]/20 -mt-0.5">
-              <span>
-                {currentIdx >= 0
-                  ? formatTime(new Date(messages[currentIdx].created_at).getTime() - timeRange.start)
-                  : "0:00"
-                }
+            {/* Control bar: Previous | Play/Pause | Next | Speed | Counter */}
+            <div className="flex items-center justify-center gap-3">
+              <button
+                onClick={goPrev}
+                disabled={currentIdx <= 0}
+                className="px-3 py-1.5 rounded-full bg-white/60 hover:bg-white/80 text-xs text-[#3D2C1E]/40 hover:text-[#3D2C1E]/70 font-medium transition-colors disabled:opacity-20 shadow-sm"
+              >
+                Previous
+              </button>
+
+              <button
+                onClick={isPlaying ? pause : play}
+                className={`
+                  w-10 h-10 rounded-full flex items-center justify-center transition-all duration-300 shadow-md
+                  ${isPlaying
+                    ? "bg-[#E76F51] text-white shadow-[#E76F51]/20"
+                    : "bg-white/80 text-[#3D2C1E]/50 hover:bg-white hover:text-[#3D2C1E]/70"
+                  }
+                `}
+              >
+                {isPlaying ? (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                    <rect x="6" y="4" width="4" height="16" rx="1" />
+                    <rect x="14" y="4" width="4" height="16" rx="1" />
+                  </svg>
+                ) : (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                    <polygon points="6,3 20,12 6,21" />
+                  </svg>
+                )}
+              </button>
+
+              <button
+                onClick={goNext}
+                disabled={currentIdx >= messages.length - 1}
+                className="px-3 py-1.5 rounded-full bg-white/60 hover:bg-white/80 text-xs text-[#3D2C1E]/40 hover:text-[#3D2C1E]/70 font-medium transition-colors disabled:opacity-20 shadow-sm"
+              >
+                Next
+              </button>
+
+              <button
+                onClick={() => setSpeed((s) => s >= 2 ? 0.5 : s + 0.5)}
+                className="px-2.5 py-1.5 rounded-full bg-white/50 hover:bg-white/70 text-[11px] text-[#3D2C1E]/35 font-medium transition-colors"
+              >
+                {speed}x
+              </button>
+
+              <span className="text-[10px] text-[#3D2C1E]/20 ml-1">
+                {currentIdx >= 0 ? `${currentIdx + 1} / ${messages.length}` : `${messages.length} messages`}
               </span>
-              <span>{currentIdx >= 0 ? `${currentIdx + 1} / ${messages.length}` : `${messages.length} messages`}</span>
-              <span>{formatTime(timeRange.duration)}</span>
             </div>
           </div>
         </div>

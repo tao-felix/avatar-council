@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { startSpeechRecognition, splitIntoSentences, AudioRecorder } from "@/lib/speech";
 import { AudioQueue } from "@/lib/audio-queue";
+import { supabase } from "@/lib/supabase";
 
 interface RoomAvatar {
   id: string;
@@ -26,18 +27,13 @@ interface OrchestrateResponse {
 }
 
 function buildSystemPrompt(strategy: string, maxSentences: number): string {
-  const base = "你是一位会议参与者。";
+  const base = "你是一位会议参与者。根据对话上下文，分享你自己的观点和见解。像真人同事一样自然交流。";
   switch (strategy) {
-    case "short_reply":
-      return `${base}简短回应，最多${maxSentences}句话。不要展开论述，像随意聊天一样。`;
-    case "deep_discuss":
-      return `${base}深入讨论这个话题，分享你的见解和经验，控制在${maxSentences}句以内。`;
-    case "ask_question":
-      return `${base}针对当前讨论提出一个有价值的问题，引导更深入的思考。最多${maxSentences}句。`;
-    case "summarize":
-      return `${base}简要总结目前的讨论要点，最多${maxSentences}句。`;
-    default:
-      return `${base}自然参与讨论，控制在2-3句话。如果没有有价值的补充，回复 [PASS]。`;
+    case "short_reply": return `${base}简短回应，最多${maxSentences}句。`;
+    case "deep_discuss": return `${base}深入分享你的想法，控制在${maxSentences}句以内。`;
+    case "ask_question": return `${base}提出你感兴趣的问题。最多${maxSentences}句。`;
+    case "summarize": return `${base}简要总结讨论，最多${maxSentences}句。`;
+    default: return `${base}控制在2-3句话。如果没有有价值的补充，回复 [PASS]。`;
   }
 }
 
@@ -64,6 +60,7 @@ export default function RoomPage() {
   const [topic, setTopic] = useState("");
   const [user, setUser] = useState<{ name: string; avatar: string } | null>(null);
   const [aiParticipants, setAiParticipants] = useState<Participant[]>([]);
+  const [isSpectator, setIsSpectator] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [isListening, setIsListening] = useState(false);
   const [interimText, setInterimText] = useState("");
@@ -102,6 +99,11 @@ export default function RoomPage() {
   const askingRef = useRef(false);
   const messagesRef = useRef<Message[]>([]);
   const mountedRef = useRef(true);
+  const isSpectatorRef = useRef(false);
+  const autoDiscussRef = useRef(false);
+  const autoTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const autoRoundCountRef = useRef(0);
+  const MAX_AUTO_ROUNDS = 1;
   const recorderRef = useRef<AudioRecorder>(new AudioRecorder());
 
   const saveMessage = useCallback((msg: { sender_id: string; sender_name: string; sender_type: string; content: string; tts_audio_url?: string }) => {
@@ -121,12 +123,22 @@ export default function RoomPage() {
       try { setUser(JSON.parse(raw)); } catch { /* */ }
     }
 
+    const parsedUser = raw ? (() => { try { return JSON.parse(raw); } catch { return null; } })() : null;
+
     fetch(`/api/rooms/${roomId}`)
       .then((r) => r.json())
       .then((room) => {
         if (!mountedRef.current) return;
         if (room.error) { setTopic("自由讨论"); return; }
         setTopic(room.topic || "自由讨论");
+
+        // Detect spectator mode
+        const humanNames: string[] = (room.human_participants || []).map((h: { name: string }) => h.name);
+        const isHost = room.created_by === parsedUser?.name;
+        const isParticipant = parsedUser?.name && humanNames.includes(parsedUser.name);
+        const spectator = !isHost && !isParticipant;
+        setIsSpectator(spectator);
+        isSpectatorRef.current = spectator;
 
         const stored: RoomAvatar[] = room.avatar_participants || [];
         setAiParticipants(stored.map((a) => ({
@@ -158,36 +170,92 @@ export default function RoomPage() {
 
     return () => {
       mountedRef.current = false;
+      autoDiscussRef.current = false;
+      if (autoTimerRef.current) clearTimeout(autoTimerRef.current);
       abortRef.current?.abort();
       audioQueueRef.current.stop();
     };
   }, [roomId]);
 
-  const askAIs = useCallback(async (allMessages: Message[]) => {
-    if (askingRef.current) return;
-    askingRef.current = true;
+  // Realtime: subscribe to new messages (for spectators and multi-session sync)
+  useEffect(() => {
+    const channel = supabase
+      .channel(`room-${roomId}`)
+      .on("postgres_changes", {
+        event: "INSERT",
+        schema: "public",
+        table: "room_messages",
+        filter: `room_id=eq.${roomId}`,
+      }, (payload) => {
+        const d = payload.new as { id: number; sender_id: string; sender_name: string; sender_type: "human" | "ai"; content: string; created_at: string };
+        const msg: Message = {
+          id: d.id,
+          senderId: d.sender_id,
+          sender: d.sender_name,
+          senderType: d.sender_type,
+          text: d.content,
+          timestamp: new Date(d.created_at).getTime(),
+        };
+        // Deduplicate: skip if we already have a message with same sender + content within 5s
+        const isDuplicate = messagesRef.current.some(
+          (m) => m.sender === msg.sender && m.text === msg.text && Math.abs(m.timestamp - msg.timestamp) < 5000
+        );
+        if (!isDuplicate) {
+          messagesRef.current = [...messagesRef.current, msg];
+          setMessages([...messagesRef.current]);
+          msgIdRef.current = Math.max(msgIdRef.current, msg.id);
 
+          // Spectator TTS: play audio for new AI messages
+          if (isSpectatorRef.current && msg.senderType === "ai") {
+            const sentences = splitIntoSentences(msg.text);
+            (async () => {
+              for (const sentence of sentences) {
+                try {
+                  const ttsRes = await fetch("/api/tts", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ text: sentence, avatarId: msg.senderId }),
+                  });
+                  const ttsData = await ttsRes.json();
+                  const url = ttsData.data?.audioUrl || ttsData.data?.url;
+                  if (url) audioQueueRef.current.enqueue(url, 0);
+                } catch { /* skip */ }
+              }
+              audioQueueRef.current.startPlayback();
+            })();
+          }
+        }
+      })
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, [roomId]);
+
+  // Shared: call orchestrator and get plan
+  const getOrchestratePlan = useCallback(async (allMessages: Message[], trigger: "human" | "auto") => {
     try {
-      // --- Step 1: Ask Gemini who should speak and how ---
-      let plan: OrchestrateResponse[] = [];
-      try {
-        const orchestrateRes = await fetch("/api/orchestrate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            topic,
-            messages: allMessages.slice(-15).map((m) => ({ sender: m.sender, text: m.text })),
-            avatars: aiParticipants.map((a) => ({ name: a.name, bio: a.bio || "" })),
-          }),
-        });
-        const orchestrateData = await orchestrateRes.json();
-        plan = orchestrateData.responses || [];
-      } catch {
-        // Fallback: all avatars respond
-        plan = aiParticipants.map((a) => ({ avatar_name: a.name, strategy: "short_reply" as const, max_sentences: 3 }));
-      }
+      const res = await fetch("/api/orchestrate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          topic,
+          messages: allMessages.slice(-15).map((m) => ({ sender: m.sender, text: m.text })),
+          avatars: aiParticipants.map((a) => ({ name: a.name, bio: a.bio || "" })),
+          trigger,
+          autoRound: trigger === "auto" ? autoRoundCountRef.current + 1 : 0,
+          maxAutoRounds: MAX_AUTO_ROUNDS,
+        }),
+      });
+      const data = await res.json();
+      return (data.responses || []) as OrchestrateResponse[];
+    } catch {
+      return aiParticipants.map((a) => ({ avatar_name: a.name, strategy: "short_reply" as const, max_sentences: 3 }));
+    }
+  }, [topic, aiParticipants]);
 
-      // --- Step 2: Execute plan — each avatar speaks in order ---
+  // Shared: execute a round of AI responses given a plan
+  const executeRound = useCallback(async (plan: OrchestrateResponse[], allMessages: Message[]): Promise<Message[]> => {
+      // Execute plan — each avatar speaks in order
       for (const response of plan) {
         if (response.strategy === "pass") continue;
         if (!mountedRef.current) break;
@@ -370,12 +438,86 @@ export default function RoomPage() {
       // All avatars done
       setActiveAiId(null);
       setActivePhase("idle");
+      return allMessages;
+  }, [aiParticipants, topic, saveMessage, roomId]);
+
+  // Human-triggered: respond to human message then resume auto-discuss
+  const askAIs = useCallback(async (allMessages: Message[]) => {
+    console.log("[askAIs] called, askingRef=", askingRef.current);
+    if (askingRef.current) { console.log("[askAIs] BLOCKED by askingRef"); return; }
+    askingRef.current = true;
+    try {
+      let plan = await getOrchestratePlan(allMessages, "human");
+      // Ensure at least one AI responds to human — filter to valid avatars
+      const validPlan = plan.filter((r) => r.strategy !== "pass" && aiParticipants.some((a) => a.name === r.avatar_name));
+      if (validPlan.length === 0 && aiParticipants.length > 0) {
+        // Fallback: pick first avatar
+        plan = [{ avatar_name: aiParticipants[0].name, strategy: "short_reply", max_sentences: 3 }];
+      }
+      allMessages = await executeRound(plan, allMessages);
     } finally {
       askingRef.current = false;
     }
-  }, [aiParticipants, topic, saveMessage]);
+    // Resume auto-discuss after human-triggered round (reset counter)
+    if (mountedRef.current && aiParticipants.length > 0) {
+      autoRoundCountRef.current = 0;
+      autoDiscussRef.current = true;
+      autoTimerRef.current = setTimeout(() => runAutoRound(), 3000);
+    }
+  }, [getOrchestratePlan, executeRound, aiParticipants.length]);
+
+  // Auto-discuss loop — max 3 rounds then pause and wait for human
+  const runAutoRound = useCallback(async () => {
+    if (!autoDiscussRef.current || !mountedRef.current || askingRef.current) return;
+
+    // Enforce max rounds
+    if (autoRoundCountRef.current >= MAX_AUTO_ROUNDS) {
+      autoDiscussRef.current = false;
+      return;
+    }
+
+    askingRef.current = true;
+    try {
+      const plan = await getOrchestratePlan(messagesRef.current, "auto");
+      if (plan.every((r) => r.strategy === "pass")) {
+        askingRef.current = false;
+        autoDiscussRef.current = false;
+        return;
+      }
+      await executeRound(plan, messagesRef.current);
+      autoRoundCountRef.current++;
+    } finally {
+      askingRef.current = false;
+    }
+    // Continue if under limit
+    if (autoDiscussRef.current && mountedRef.current && autoRoundCountRef.current < MAX_AUTO_ROUNDS) {
+      autoTimerRef.current = setTimeout(() => runAutoRound(), 2500);
+    } else {
+      autoDiscussRef.current = false;
+    }
+  }, [getOrchestratePlan, executeRound]);
+
+  // Auto-start discussion only for new rooms (no message history)
+  useEffect(() => {
+    if (aiParticipants.length > 0 && messagesRef.current.length === 0) {
+      autoRoundCountRef.current = 0;
+      autoDiscussRef.current = true;
+      autoTimerRef.current = setTimeout(() => {
+        if (autoDiscussRef.current && mountedRef.current) runAutoRound();
+      }, 2000);
+    }
+  }, [aiParticipants, runAutoRound]);
+
+  const stopAutoDiscuss = () => {
+    autoDiscussRef.current = false;
+    if (autoTimerRef.current) {
+      clearTimeout(autoTimerRef.current);
+      autoTimerRef.current = null;
+    }
+  };
 
   const stopAI = () => {
+    stopAutoDiscuss();
     askingRef.current = false;
     abortRef.current?.abort();
     abortRef.current = null;
@@ -492,12 +634,18 @@ export default function RoomPage() {
           <p className="text-[#3D2C1E]/60 text-sm font-medium">{topic}</p>
           <p className="text-[#3D2C1E]/25 text-[10px]">房间 {roomId} · {aiParticipants.length} 个分身</p>
         </div>
-        <button
-          onClick={endRoom}
-          className="shrink-0 mt-0.5 px-3 py-1 rounded-full text-[10px] text-[#E76F51]/50 hover:text-[#E76F51] hover:bg-[#E76F51]/8 transition-colors"
-        >
-          结束会议
-        </button>
+        {isSpectator ? (
+          <span className="shrink-0 mt-0.5 px-3 py-1 rounded-full text-[10px] bg-[#9B5DE5]/8 text-[#9B5DE5]/50">
+            旁听中
+          </span>
+        ) : (
+          <button
+            onClick={endRoom}
+            className="shrink-0 mt-0.5 px-3 py-1 rounded-full text-[10px] text-[#E76F51]/50 hover:text-[#E76F51] hover:bg-[#E76F51]/8 transition-colors"
+          >
+            结束会议
+          </button>
+        )}
       </div>
 
       {/* No avatars hint */}
@@ -592,7 +740,8 @@ export default function RoomPage() {
         </div>
       </div>
 
-      {/* Human area */}
+      {/* Human area — hidden for spectators */}
+      {!isSpectator && (
       <div className="absolute bottom-0 left-0 right-0 z-10 flex flex-col items-center pb-8">
         {/* Text input/display area */}
         <div className="mb-4 max-w-[320px] w-[280px]">
@@ -702,10 +851,13 @@ export default function RoomPage() {
           <span className="text-xs text-[#3D2C1E]/30">{user?.name || ""}</span>
         </div>
 
-        {messages.length === 0 && !isListening && (
-          <p className="mt-3 text-[#3D2C1E]/15 text-[11px]">点击麦克风开始发言</p>
+        {!isListening && (
+          <p className="mt-3 text-[#3D2C1E]/15 text-[11px]">
+            {activePhase !== "idle" ? "随时插话..." : "点击麦克风或输入文字"}
+          </p>
         )}
       </div>
+      )}
     </main>
   );
 }

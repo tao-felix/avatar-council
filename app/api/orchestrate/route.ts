@@ -1,4 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
+import { writeFileSync, appendFileSync, mkdirSync } from "fs";
+
+const LOG_DIR = "/Users/fangbotao/Claude_Code/tmp";
+function log(msg: string) {
+  try {
+    mkdirSync(LOG_DIR, { recursive: true });
+    appendFileSync(`${LOG_DIR}/orchestrate.log`, `[${new Date().toISOString()}] ${msg}\n`);
+  } catch { /* */ }
+}
 
 const GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent";
 
@@ -6,14 +15,18 @@ interface OrchestrateRequest {
   topic: string;
   messages: { sender: string; text: string }[];
   avatars: { name: string; bio: string }[];
+  trigger?: "human" | "auto";
+  autoRound?: number;   // current round (1-based), 0 = human-triggered
+  maxAutoRounds?: number;
 }
 
 export async function POST(req: NextRequest) {
-  const { topic, messages, avatars } = (await req.json()) as OrchestrateRequest;
+  const { topic, messages, avatars, trigger = "human", autoRound = 0, maxAutoRounds = 2 } = (await req.json()) as OrchestrateRequest;
+  log(`--- REQUEST trigger=${trigger} topic="${topic}" msgs=${messages.length} avatars=${avatars.map(a=>a.name).join(",")}`);
+  log(`LAST MSG: ${messages.length > 0 ? `${messages[messages.length-1].sender}: ${messages[messages.length-1].text.slice(0, 100)}` : "(none)"}`);
   const apiKey = process.env.GOOGLE_GEMINI_API_KEY;
 
   if (!apiKey) {
-    // Fallback: all avatars respond with default strategy
     return NextResponse.json({
       responses: avatars.map((a) => ({
         avatar_name: a.name,
@@ -32,6 +45,16 @@ export async function POST(req: NextRequest) {
     .map((a) => `- ${a.name}: ${a.bio || "（暂无简介）"}`)
     .join("\n");
 
+  const autoRules = trigger === "auto" ? `
+- 这是分身自主讨论（第 ${autoRound} 轮，最多 ${maxAutoRounds} 轮），不是回应人类
+- 如果没有值得补充的内容，全部返回 pass 即可
+- 每轮只安排 1-2 个人说话` : "";
+
+  const openingRules = messages.length === 0 ? `
+- 这是会议的开场，还没有人说话
+- 安排 1-2 个分身做开场发言，自然地引入会议主题
+- 开场应该轻松友好，像朋友聚会开始的感觉` : "";
+
   const prompt = `你是一个会议编排 AI。根据以下会议上下文，决定接下来哪些分身应该发言、以什么方式发言。
 
 会议主题：${topic}
@@ -39,8 +62,7 @@ export async function POST(req: NextRequest) {
 参会分身：
 ${avatarList}
 
-最近对话：
-${recentContext}
+${messages.length > 0 ? `最近对话：\n${recentContext}` : "（会议刚开始，还没有对话）"}
 
 请返回 JSON（不要其他内容）：
 {
@@ -61,13 +83,13 @@ strategy 可选值：
 - pass: 不说话
 
 规则：
-- 如果用户明确提到了某个分身的名字（如"蛋总讲个笑话"、"Tao你觉得呢"），被点名的分身必须回应，且应该排在第一个
-- 不是所有人都需要说话，可以 0 个人说
+- 只能安排"参会分身"中的分身发言，不要输出真人用户
+- 真人说话后，至少安排 1 个分身回应
+- 被点名的分身必须回应，排在第一个
 - 大部分时候 1-2 个人回应就够了
 - 考虑每个分身的背景和性格，话题跟谁相关谁说
 - 如果前面已经有分身说了类似的观点，后面的就不用重复
-- 对话刚开始时可以多人参与，深入讨论后聚焦 1-2 人
-- 不要让同一个人连续说太多轮`;
+- 不要让同一个人连续说太多轮${autoRules}${openingRules}`;
 
   try {
     const res = await fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
@@ -84,17 +106,16 @@ strategy 可选值：
 
     const data = await res.json();
     const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    log(`GEMINI raw: ${text.slice(0, 500)}`);
 
     try {
       const parsed = JSON.parse(text);
       if (parsed.responses && Array.isArray(parsed.responses)) {
+        log(`RESULT: ${JSON.stringify(parsed.responses.map((r: { avatar_name: string; strategy: string }) => `${r.avatar_name}:${r.strategy}`))}`);
         return NextResponse.json(parsed);
       }
-    } catch {
-      // JSON parse failed
-    }
+    } catch { /* JSON parse failed */ }
 
-    // Fallback
     return NextResponse.json({
       responses: avatars.map((a) => ({
         avatar_name: a.name,
