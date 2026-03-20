@@ -59,11 +59,15 @@ export default function Home() {
   const [roomTab, setRoomTab] = useState<"discover" | "my">("discover");
   const [isPublicRoom, setIsPublicRoom] = useState(true);
   const [topicFocused, setTopicFocused] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState(false);
 
   useEffect(() => {
     const raw = getCookie("sm_user");
     if (raw) {
       try { setUser(JSON.parse(raw)); } catch { /* */ }
+      if (!localStorage.getItem("avatar_council_onboarded")) {
+        setShowOnboarding(true);
+      }
     }
 
     fetch("/api/avatars")
@@ -162,6 +166,50 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-[#FEF3E2] relative">
+      {/* Onboarding modal */}
+      {showOnboarding && (
+        <div className="fixed inset-0 z-50 bg-black/20 backdrop-blur-sm flex items-center justify-center px-6" onClick={() => { localStorage.setItem("avatar_council_onboarded", "1"); setShowOnboarding(false); }}>
+          <div className="bg-[#FEF3E2] rounded-3xl shadow-2xl max-w-sm w-full p-8 animate-fade-in" onClick={(e) => e.stopPropagation()}>
+            {/* Avatar faces */}
+            <div className="flex justify-center -space-x-2 mb-5">
+              {avatars.slice(0, 4).map((a, i) => (
+                <div key={a.id} className="w-10 h-10 rounded-full overflow-hidden border-2 border-white/80 animate-float" style={{ animationDelay: `${i * 0.3}s` }}>
+                  {a.avatar_url ? (
+                    <img src={a.avatar_url} alt={a.name} className="w-full h-full object-cover" />
+                  ) : (
+                    <div className="w-full h-full bg-[#9B5DE5]/15 flex items-center justify-center text-xs font-bold text-[#9B5DE5]/50">{a.name[0]}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            <h2 className="text-xl font-bold text-[#3D2C1E] text-center mb-4">欢迎来到分身议事</h2>
+
+            <div className="space-y-3 mb-8">
+              <div className="flex items-start gap-3">
+                <span className="text-base mt-0.5">🎙</span>
+                <p className="text-sm text-[#3D2C1E]/60">选择 AI 分身，开启语音圆桌</p>
+              </div>
+              <div className="flex items-start gap-3">
+                <span className="text-base mt-0.5">💬</span>
+                <p className="text-sm text-[#3D2C1E]/60">分身会自主讨论，你随时插话</p>
+              </div>
+              <div className="flex items-start gap-3">
+                <span className="text-base mt-0.5">🌐</span>
+                <p className="text-sm text-[#3D2C1E]/60">发现公开房间，旁听精彩对话</p>
+              </div>
+            </div>
+
+            <button
+              onClick={() => { localStorage.setItem("avatar_council_onboarded", "1"); setShowOnboarding(false); }}
+              className="w-full py-3 rounded-2xl bg-[#9B5DE5] text-white font-medium hover:bg-[#8a4dd4] transition-colors shadow-lg shadow-[#9B5DE5]/20"
+            >
+              开始探索
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Ambient */}
       <div className="fixed inset-0 pointer-events-none">
         <div className="absolute top-1/4 left-1/3 w-80 h-80 bg-[#9B5DE5]/6 rounded-full blur-[100px]" />
