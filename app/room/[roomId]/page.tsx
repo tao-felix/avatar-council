@@ -443,8 +443,7 @@ export default function RoomPage() {
 
   // Human-triggered: respond to human message then resume auto-discuss
   const askAIs = useCallback(async (allMessages: Message[]) => {
-    console.log("[askAIs] called, askingRef=", askingRef.current);
-    if (askingRef.current) { console.log("[askAIs] BLOCKED by askingRef"); return; }
+    if (askingRef.current) return;
     askingRef.current = true;
     try {
       let plan = await getOrchestratePlan(allMessages, "human");
@@ -466,7 +465,7 @@ export default function RoomPage() {
     }
   }, [getOrchestratePlan, executeRound, aiParticipants.length]);
 
-  // Auto-discuss loop — max 3 rounds then pause and wait for human
+  // Auto-discuss loop — 0 or 1 round after human response
   const runAutoRound = useCallback(async () => {
     if (!autoDiscussRef.current || !mountedRef.current || askingRef.current) return;
 

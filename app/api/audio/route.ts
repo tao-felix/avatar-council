@@ -10,6 +10,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "file and roomId required" }, { status: 400 });
   }
 
+  // 10MB limit
+  if (file.size > 10 * 1024 * 1024) {
+    return NextResponse.json({ error: "File too large (max 10MB)" }, { status: 413 });
+  }
+
   const sb = getServiceSupabase();
   const fileName = `${roomId}/${Date.now()}.webm`;
   const buffer = Buffer.from(await file.arrayBuffer());

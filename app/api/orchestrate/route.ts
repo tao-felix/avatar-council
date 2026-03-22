@@ -1,13 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { writeFileSync, appendFileSync, mkdirSync } from "fs";
-
-const LOG_DIR = "/Users/fangbotao/Claude_Code/tmp";
-function log(msg: string) {
-  try {
-    mkdirSync(LOG_DIR, { recursive: true });
-    appendFileSync(`${LOG_DIR}/orchestrate.log`, `[${new Date().toISOString()}] ${msg}\n`);
-  } catch { /* */ }
-}
 
 const GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent";
 
@@ -22,9 +13,7 @@ interface OrchestrateRequest {
 
 export async function POST(req: NextRequest) {
   const { topic, messages, avatars, trigger = "human", autoRound = 0, maxAutoRounds = 2 } = (await req.json()) as OrchestrateRequest;
-  log(`--- REQUEST trigger=${trigger} topic="${topic}" msgs=${messages.length} avatars=${avatars.map(a=>a.name).join(",")}`);
-  log(`LAST MSG: ${messages.length > 0 ? `${messages[messages.length-1].sender}: ${messages[messages.length-1].text.slice(0, 100)}` : "(none)"}`);
-  const apiKey = process.env.GOOGLE_GEMINI_API_KEY;
+const apiKey = process.env.GOOGLE_GEMINI_API_KEY;
 
   if (!apiKey) {
     return NextResponse.json({
@@ -106,13 +95,11 @@ strategy 可选值：
 
     const data = await res.json();
     const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-    log(`GEMINI raw: ${text.slice(0, 500)}`);
 
     try {
       const parsed = JSON.parse(text);
       if (parsed.responses && Array.isArray(parsed.responses)) {
-        log(`RESULT: ${JSON.stringify(parsed.responses.map((r: { avatar_name: string; strategy: string }) => `${r.avatar_name}:${r.strategy}`))}`);
-        return NextResponse.json(parsed);
+return NextResponse.json(parsed);
       }
     } catch { /* JSON parse failed */ }
 

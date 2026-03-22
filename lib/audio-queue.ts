@@ -72,5 +72,8 @@ export class AudioQueue {
       this.audio.pause();
       this.audio = null;
     }
+    // Resolve any pending onFinish promise so callers don't hang
+    this.onFinish?.();
+    this.onFinish = null;
   }
 }
