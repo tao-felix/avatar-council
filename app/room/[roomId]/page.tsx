@@ -5,6 +5,11 @@ import { useParams, useRouter } from "next/navigation";
 import { startSpeechRecognition, splitIntoSentences, AudioRecorder } from "@/lib/speech";
 import { AudioQueue } from "@/lib/audio-queue";
 import { supabase } from "@/lib/supabase";
+import { Campfire } from "@/components/Campfire";
+import { ForestScene } from "@/components/ForestScene";
+import { SceneAudio } from "@/components/SceneAudio";
+import { ShareSheet } from "@/components/ShareSheet";
+import { SCENES, SCENE_LIST, type SceneType } from "@/lib/scenes";
 
 interface RoomAvatar {
   id: string;
@@ -44,6 +49,7 @@ interface Message {
   senderType: "human" | "ai";
   text: string;
   timestamp: number;
+  ttsAudioUrl?: string;
 }
 
 function getCookie(name: string) {
@@ -60,7 +66,15 @@ export default function RoomPage() {
   const [topic, setTopic] = useState("");
   const [user, setUser] = useState<{ name: string; avatar: string } | null>(null);
   const [aiParticipants, setAiParticipants] = useState<Participant[]>([]);
+  const [scene, setScene] = useState<SceneType>("campfire");
+  const [sceneOpen, setSceneOpen] = useState(false);
   const [isSpectator, setIsSpectator] = useState(false);
+  const [hostName, setHostName] = useState<string | null>(null);
+  const [otherHumans, setOtherHumans] = useState<{ name: string; avatar: string }[]>([]);
+  const [addAiOpen, setAddAiOpen] = useState(false);
+  const [allAvatars, setAllAvatars] = useState<{ id: string; name: string; avatar_url: string }[]>([]);
+  const [menuTarget, setMenuTarget] = useState<{ name: string; type: "human" | "ai" } | null>(null);
+  const [confirmKick, setConfirmKick] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [isListening, setIsListening] = useState(false);
   const [interimText, setInterimText] = useState("");
@@ -72,8 +86,26 @@ export default function RoomPage() {
   const [aiStreamText, setAiStreamText] = useState("");
   const [playingSentenceIdx, setPlayingSentenceIdx] = useState(-1);
   const [bubbleOverflow, setBubbleOverflow] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [playingMsgId, setPlayingMsgId] = useState<number | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
+  const [revealedIdx, setRevealedIdx] = useState(-1); // sentences revealed so far (synced with TTS)
+  const [replayingId, setReplayingId] = useState<string | null>(null);
+  const [replaySentenceIdx, setReplaySentenceIdx] = useState(-1);
+  const replayQueueRef = useRef<AudioQueue>(new AudioQueue());
+  const replaySentencesRef = useRef<string[]>([]);
+  const historyEndRef = useRef<HTMLDivElement>(null);
+  const historyAudioRef = useRef<HTMLAudioElement | null>(null);
   const sentencesRef = useRef<string[]>([]);
   const bubbleRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll history panel
+  useEffect(() => {
+    if (historyOpen && historyEndRef.current) {
+      historyEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [messages, historyOpen]);
 
   // Scroll to highlighted sentence when it changes
   useEffect(() => {
@@ -92,6 +124,7 @@ export default function RoomPage() {
   }, [aiStreamText, activeAiId, playingSentenceIdx]);
 
   const recognitionRef = useRef<ReturnType<typeof startSpeechRecognition>>(null);
+  const suppressFinalRef = useRef(false);
   const audioQueueRef = useRef<AudioQueue>(new AudioQueue());
   const msgIdRef = useRef(0);
   const sessionMapRef = useRef<Record<string, string | undefined>>({});
@@ -125,27 +158,46 @@ export default function RoomPage() {
 
     const parsedUser = raw ? (() => { try { return JSON.parse(raw); } catch { return null; } })() : null;
 
-    fetch(`/api/rooms/${roomId}`)
-      .then((r) => r.json())
-      .then((room) => {
+    (async () => {
+      try {
+        let room = await fetch(`/api/rooms/${roomId}`).then((r) => r.json());
         if (!mountedRef.current) return;
         if (room.error) { setTopic("自由讨论"); return; }
         setTopic(room.topic || "自由讨论");
+        setScene(room.scene || "campfire");
+        setHostName(room.host_name || room.created_by || null);
 
-        // Detect spectator mode
         const humanNames: string[] = (room.human_participants || []).map((h: { name: string }) => h.name);
-        const isHost = room.created_by === parsedUser?.name;
-        const isParticipant = parsedUser?.name && humanNames.includes(parsedUser.name);
-        const spectator = !isHost && !isParticipant;
+        const isLoggedIn = !!parsedUser?.name;
+
+        // Auto-join if logged in and not already in participants
+        if (isLoggedIn && !humanNames.includes(parsedUser.name)) {
+          await fetch(`/api/rooms/${roomId}/join`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: parsedUser.name, avatar: parsedUser.avatar || "", type: "human" }),
+          }).catch(() => {});
+          const updated = await fetch(`/api/rooms/${roomId}`).then((r) => r.json()).catch(() => room);
+          if (!updated.error) room = updated;
+        }
+
+        // Spectator = not logged in
+        const spectator = !isLoggedIn;
         setIsSpectator(spectator);
         isSpectatorRef.current = spectator;
 
+        // Load AI participants
         const stored: RoomAvatar[] = room.avatar_participants || [];
         setAiParticipants(stored.map((a) => ({
           id: a.id, name: a.name, avatar: a.avatar_url, type: "ai" as const,
         })));
-      })
-      .catch(() => setTopic("自由讨论"));
+
+        // Load other human participants (exclude self)
+        const humans: { name: string; avatar: string }[] = room.human_participants || [];
+        setOtherHumans(humans.filter((h) => h.name !== parsedUser?.name));
+        setHostName(room.host_name || room.created_by || null);
+      } catch { setTopic("自由讨论"); }
+    })();
 
     // Load history messages
     fetch(`/api/rooms/${roomId}/messages`)
@@ -153,12 +205,13 @@ export default function RoomPage() {
       .then((data) => {
         if (!mountedRef.current) return;
         if (Array.isArray(data) && data.length > 0) {
-          const loaded: Message[] = data.map((d: { id: number; sender_id: string; sender_name: string; sender_type: "human" | "ai"; content: string; created_at: string }, i: number) => ({
+          const loaded: Message[] = data.map((d: { id: number; sender_id: string; sender_name: string; sender_type: "human" | "ai"; content: string; tts_audio_url?: string; created_at: string }, i: number) => ({
             id: i + 1,
             senderId: d.sender_id,
             sender: d.sender_name,
             senderType: d.sender_type,
             text: d.content,
+            ttsAudioUrl: d.tts_audio_url || undefined,
             timestamp: new Date(d.created_at).getTime(),
           }));
           setMessages(loaded);
@@ -177,9 +230,11 @@ export default function RoomPage() {
     };
   }, [roomId]);
 
-  // Realtime: subscribe to new messages (for spectators and multi-session sync)
+  // Realtime: subscribe to new messages + play audio for non-self messages
   useEffect(() => {
-    const channel = supabase
+    const currentUserName = (() => { try { const raw = getCookie("sm_user"); return raw ? JSON.parse(raw).name : null; } catch { return null; } })();
+
+    const msgChannel = supabase
       .channel(`room-${roomId}`)
       .on("postgres_changes", {
         event: "INSERT",
@@ -187,16 +242,16 @@ export default function RoomPage() {
         table: "room_messages",
         filter: `room_id=eq.${roomId}`,
       }, (payload) => {
-        const d = payload.new as { id: number; sender_id: string; sender_name: string; sender_type: "human" | "ai"; content: string; created_at: string };
+        const d = payload.new as { id: number; sender_id: string; sender_name: string; sender_type: "human" | "ai"; content: string; tts_audio_url?: string; created_at: string };
         const msg: Message = {
           id: d.id,
           senderId: d.sender_id,
           sender: d.sender_name,
           senderType: d.sender_type,
           text: d.content,
+          ttsAudioUrl: d.tts_audio_url || undefined,
           timestamp: new Date(d.created_at).getTime(),
         };
-        // Deduplicate: skip if we already have a message with same sender + content within 5s
         const isDuplicate = messagesRef.current.some(
           (m) => m.sender === msg.sender && m.text === msg.text && Math.abs(m.timestamp - msg.timestamp) < 5000
         );
@@ -205,30 +260,80 @@ export default function RoomPage() {
           setMessages([...messagesRef.current]);
           msgIdRef.current = Math.max(msgIdRef.current, msg.id);
 
-          // Spectator TTS: play audio for new AI messages
-          if (isSpectatorRef.current && msg.senderType === "ai") {
-            const sentences = splitIntoSentences(msg.text);
-            (async () => {
-              for (const sentence of sentences) {
-                try {
-                  const ttsRes = await fetch("/api/tts", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ text: sentence, avatarId: msg.senderId }),
-                  });
-                  const ttsData = await ttsRes.json();
-                  const url = ttsData.data?.audioUrl || ttsData.data?.url;
-                  if (url) audioQueueRef.current.enqueue(url, 0);
-                } catch { /* skip */ }
+          // Play audio for messages from others (not self)
+          const isSelf = msg.sender === currentUserName;
+          if (!isSelf && !askingRef.current) {
+            if (msg.ttsAudioUrl) {
+              // Play stored audio (human recording or AI TTS)
+              try {
+                const parsed = JSON.parse(msg.ttsAudioUrl);
+                const urls: string[] = Array.isArray(parsed) ? parsed : [msg.ttsAudioUrl];
+                urls.forEach((url, i) => audioQueueRef.current.enqueue(url, i));
+              } catch {
+                audioQueueRef.current.enqueue(msg.ttsAudioUrl, 0);
               }
               audioQueueRef.current.startPlayback();
-            })();
+            } else if (msg.senderType === "ai") {
+              // AI without stored URL — generate TTS on the fly
+              const sentences = splitIntoSentences(msg.text);
+              (async () => {
+                for (const sentence of sentences) {
+                  try {
+                    const ttsRes = await fetch("/api/tts", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ text: sentence, avatarId: msg.senderId }),
+                    });
+                    const ttsData = await ttsRes.json();
+                    const url = ttsData.data?.audioUrl || ttsData.data?.url;
+                    if (url) audioQueueRef.current.enqueue(url, 0);
+                  } catch { /* skip */ }
+                }
+                audioQueueRef.current.startPlayback();
+              })();
+            }
           }
         }
       })
       .subscribe();
 
-    return () => { supabase.removeChannel(channel); };
+    // Realtime: subscribe to room participant changes
+    const roomChannel = supabase
+      .channel(`room-sync-${roomId}`)
+      .on("postgres_changes", {
+        event: "UPDATE",
+        schema: "public",
+        table: "rooms",
+        filter: `id=eq.${roomId}`,
+      }, (payload) => {
+        const updated = payload.new as {
+          avatar_participants: RoomAvatar[];
+          human_participants: { name: string; avatar: string }[];
+          host_name: string | null;
+        };
+        // Update AI participants
+        setAiParticipants((updated.avatar_participants || []).map((a) => ({
+          id: a.id, name: a.name, avatar: a.avatar_url, type: "ai" as const,
+        })));
+        // Update other humans (exclude self)
+        setOtherHumans((updated.human_participants || []).filter((h) => h.name !== currentUserName));
+        // Update host
+        setHostName(updated.host_name);
+        // Check if kicked
+        if (currentUserName) {
+          const stillIn = (updated.human_participants || []).some((h) => h.name === currentUserName);
+          if (!stillIn && !isSpectatorRef.current) {
+            alert("你已被移出房间");
+            window.location.href = "/";
+          }
+        }
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(msgChannel);
+      supabase.removeChannel(roomChannel);
+    };
   }, [roomId]);
 
   // Shared: call orchestrator and get plan
@@ -258,20 +363,22 @@ export default function RoomPage() {
       // Execute plan — each avatar speaks in order
       for (const response of plan) {
         if (response.strategy === "pass") continue;
-        if (!mountedRef.current) break;
+        if (!mountedRef.current || !askingRef.current) break;
 
         const ai = aiParticipants.find((a) => a.name === response.avatar_name);
         if (!ai) continue;
 
         const systemPrompt = buildSystemPrompt(response.strategy, response.max_sentences);
 
-        // Clean slate for this avatar's audio
+        // Fresh queue — old in-flight TTS promises will enqueue to the dead old queue
         audioQueueRef.current.stop();
+        audioQueueRef.current = new AudioQueue();
 
         setActiveAiId(ai.id);
         setActivePhase("thinking");
         setAiStreamText("");
         setPlayingSentenceIdx(-1);
+        setRevealedIdx(-1);
 
         // Build context from ALL messages including previous AI replies in this round
         const context = allMessages
@@ -321,8 +428,12 @@ export default function RoomPage() {
           const ttsPromises: Promise<void>[] = [];
 
           const queue = audioQueueRef.current;
-          queue.onPlay = (idx) => setPlayingSentenceIdx(idx);
+          queue.onPlay = (idx) => {
+            setPlayingSentenceIdx(idx);
+            setRevealedIdx(idx); // reveal sentences up to current playing
+          };
 
+          const ttsUrls: Record<number, string> = {}; // index → url
           const fireTTS = (sentence: string, index: number) => {
             const p = fetch("/api/tts", {
               method: "POST",
@@ -333,6 +444,7 @@ export default function RoomPage() {
               .then((ttsData) => {
                 const url = ttsData.data?.audioUrl || ttsData.data?.url;
                 if (url && mountedRef.current) {
+                  ttsUrls[index] = url;
                   queue.enqueue(url, index);
                   if (!queue.isPlaying()) {
                     setActivePhase("playing");
@@ -366,6 +478,7 @@ export default function RoomPage() {
 
                     // Fire TTS for each newly completed sentence
                     const currentSentences = splitIntoSentences(fullText);
+                    sentencesRef.current = currentSentences; // keep synced for reveal
                     while (ttsIndex < currentSentences.length - 1) {
                       fireTTS(currentSentences[ttsIndex], ttsIndex);
                       ttsIndex++;
@@ -406,18 +519,43 @@ export default function RoomPage() {
           allMessages = [...allMessages, aiMsg];
           setAiStreamText("");
 
-          // Save to DB
-          saveMessage({ sender_id: ai.id, sender_name: ai.name, sender_type: "ai", content: fullText });
+          // Save text to DB first (TTS URLs come later via PATCH)
+          const saveRes = await fetch(`/api/rooms/${roomId}/messages`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sender_id: ai.id, sender_name: ai.name, sender_type: "ai", content: fullText }),
+          }).then((r) => r.json()).catch(() => null);
+          const dbMsgId = saveRes?.id;
 
           // Wait for all TTS requests to finish, then seal queue and wait for playback
           await Promise.all(ttsPromises);
+
+          // PATCH all TTS URLs as JSON array
+          const allUrls = Object.keys(ttsUrls).sort((a, b) => +a - +b).map((k) => ttsUrls[+k]);
+          if (allUrls.length > 0 && dbMsgId) {
+            const urlsJson = JSON.stringify(allUrls);
+            fetch(`/api/rooms/${roomId}/messages`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ messageId: dbMsgId, tts_audio_url: urlsJson }),
+            }).catch(() => {});
+            // Update in-memory
+            aiMsg.ttsAudioUrl = urlsJson;
+            messagesRef.current = messagesRef.current.map((m) =>
+              m.id === aiMsg.id ? { ...m, ttsAudioUrl: urlsJson } : m
+            );
+            setMessages([...messagesRef.current]);
+          }
 
           // Wait for all TTS to arrive, then wait for playback to finish
           if (mountedRef.current && (queue.isPlaying() || queue.hasItems())) {
             await new Promise<void>((resolve) => {
               queue.onFinish = () => {
-                if (mountedRef.current) setPlayingSentenceIdx(-1);
-                resolve(); // Don't clear activeAiId here — let the for loop handle it
+                if (mountedRef.current) {
+                  setPlayingSentenceIdx(-1);
+                  setRevealedIdx(-1);
+                }
+                resolve();
               };
               queue.seal();
             });
@@ -521,10 +659,78 @@ export default function RoomPage() {
     abortRef.current?.abort();
     abortRef.current = null;
     audioQueueRef.current.stop();
+    audioQueueRef.current = new AudioQueue();
     setActiveAiId(null);
     setActivePhase("idle");
     setPlayingSentenceIdx(-1);
     setAiStreamText("");
+  };
+
+  const stopReplay = () => {
+    replayQueueRef.current.stop();
+    replayQueueRef.current = new AudioQueue();
+    setReplayingId(null);
+    setReplaySentenceIdx(-1);
+    replaySentencesRef.current = [];
+  };
+
+  const replayMessage = async (participantId: string, msg: Message) => {
+    // Stop any existing replay or AI speech
+    if (replayingId) stopReplay();
+    if (activePhase !== "idle") stopAI();
+
+    const sentences = splitIntoSentences(msg.text);
+    if (sentences.length === 0) return;
+
+    replaySentencesRef.current = sentences;
+    setReplayingId(participantId);
+    setReplaySentenceIdx(-1);
+
+    const queue = new AudioQueue();
+    replayQueueRef.current = queue;
+    queue.onPlay = (idx) => setReplaySentenceIdx(idx);
+    queue.onFinish = () => {
+      setReplayingId(null);
+      setReplaySentenceIdx(-1);
+      replaySentencesRef.current = [];
+    };
+
+    // Try to use stored TTS URLs first
+    let storedUrls: string[] = [];
+    if (msg.ttsAudioUrl) {
+      try {
+        const parsed = JSON.parse(msg.ttsAudioUrl);
+        storedUrls = Array.isArray(parsed) ? parsed : [msg.ttsAudioUrl];
+      } catch {
+        storedUrls = [msg.ttsAudioUrl];
+      }
+    }
+
+    if (storedUrls.length > 0) {
+      // Instant replay from stored URLs
+      storedUrls.forEach((url, i) => queue.enqueue(url, i));
+      queue.seal();
+      queue.startPlayback();
+    } else {
+      // Fallback: generate TTS on the fly
+      const ai = aiParticipants.find((a) => a.id === participantId);
+      for (let i = 0; i < sentences.length; i++) {
+        try {
+          const res = await fetch("/api/tts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: sentences[i], avatarId: ai?.id || participantId }),
+          });
+          const ttsData = await res.json();
+          const url = ttsData.data?.audioUrl || ttsData.data?.url;
+          if (url) {
+            queue.enqueue(url, i);
+            if (!queue.isPlaying()) queue.startPlayback();
+          }
+        } catch { /* skip */ }
+      }
+      queue.seal();
+    }
   };
 
   const uploadAudio = async (blob: Blob): Promise<string | undefined> => {
@@ -541,7 +747,8 @@ export default function RoomPage() {
 
   const sendHumanMessage = (text: string) => {
     if (!text.trim()) return;
-    // Interrupt AI if active
+    // Interrupt AI and replay if active
+    if (replayingId) stopReplay();
     if (askingRef.current || activePhase !== "idle") stopAI();
     // Flash "已发送"
     setSentFlash(true);
@@ -587,8 +794,10 @@ export default function RoomPage() {
     setIsListening(true);
     // Start audio recording alongside speech recognition
     recorderRef.current.start().catch(() => {});
+    suppressFinalRef.current = false;
     recognitionRef.current = startSpeechRecognition(
       (text, isFinal) => {
+        if (suppressFinalRef.current) return;
         if (isFinal && text.trim()) {
           sendHumanMessage(text.trim());
           setInterimText("");
@@ -600,9 +809,30 @@ export default function RoomPage() {
     );
   };
 
-  const getAiPosition = (index: number, total: number) => {
-    const spacing = 100 / (total + 1);
-    return { left: `${spacing * (index + 1)}%` };
+  // Build unified participant list (AI + other humans, excluding self)
+  const allParticipants = [
+    ...aiParticipants.map((a) => ({ id: a.id, name: a.name, avatar: a.avatar, type: "ai" as const })),
+    ...otherHumans.map((h) => ({ id: h.name, name: h.name, avatar: h.avatar, type: "human" as const })),
+  ];
+
+  // Preset symmetric positions for 1–8 participants (% of container)
+  // Designed to avoid the bottom area (user input) and stay balanced
+  const POSITION_PRESETS: Record<number, [number, number][]> = {
+    1: [[50, 20]],
+    2: [[30, 22], [70, 22]],
+    3: [[50, 14], [24, 50], [76, 50]],
+    4: [[30, 14], [70, 14], [22, 52], [78, 52]],
+    5: [[50, 10], [22, 30], [78, 30], [20, 58], [80, 58]],
+    6: [[35, 10], [65, 10], [20, 36], [80, 36], [24, 60], [76, 60]],
+    7: [[50, 8], [24, 22], [76, 22], [18, 44], [82, 44], [24, 64], [76, 64]],
+    8: [[35, 8], [65, 8], [20, 28], [80, 28], [18, 50], [82, 50], [24, 66], [76, 66]],
+  };
+
+  const getParticipantPosition = (index: number, total: number) => {
+    const clamped = Math.min(total, 8);
+    const positions = POSITION_PRESETS[clamped] || POSITION_PRESETS[8];
+    const [x, y] = positions[index] || [50, 50];
+    return { left: `${x}%`, top: `${y}%` };
   };
 
   const getLatestMessage = (participantId: string) => {
@@ -610,134 +840,440 @@ export default function RoomPage() {
   };
 
   const endRoom = async () => {
-    await fetch(`/api/rooms/${roomId}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status: "ended", ended_at: new Date().toISOString() }),
-    });
+    if (user?.name === hostName) {
+      // Host ending = close room for all
+      await fetch(`/api/rooms/${roomId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "ended", ended_at: new Date().toISOString() }),
+      });
+    }
     recognitionRef.current?.stop();
     audioQueueRef.current.stop();
     router.push("/");
   };
 
+  const leaveRoom = async () => {
+    if (!user?.name) return;
+    // Remove self from participants + transfer host if needed
+    await fetch(`/api/rooms/${roomId}/kick`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: user.name, type: "human", requestedBy: user.name }),
+    }).catch(() => {});
+    recognitionRef.current?.stop();
+    audioQueueRef.current.stop();
+    router.push("/");
+  };
+
+  const sceneConfig = SCENES[scene];
+
   return (
-    <main className="h-screen w-screen overflow-hidden relative bg-[#FEF3E2]">
-      <div className="fixed inset-0 pointer-events-none">
-        <div className="absolute top-0 left-1/4 w-[400px] h-[400px] bg-[#9B5DE5]/4 rounded-full blur-[120px]" />
-        <div className="absolute top-1/4 right-1/4 w-[350px] h-[350px] bg-[#F4A261]/5 rounded-full blur-[100px]" />
+    <main className="h-screen w-screen overflow-hidden relative" style={{ backgroundColor: sceneConfig.bgColor }}>
+      <SceneAudio audioSrc={sceneConfig.audioSrc} />
+
+      {/* Scene switcher */}
+      <div className="fixed bottom-5 right-16 z-50">
+        <button
+          onClick={() => setSceneOpen(!sceneOpen)}
+          className="w-9 h-9 rounded-full bg-black/20 backdrop-blur-sm flex items-center justify-center text-[#FFF8F0]/60 hover:text-[#FFF8F0]/80 hover:bg-black/30 transition-colors text-base"
+          title="切换场景"
+        >
+          {SCENES[scene].emoji}
+        </button>
+        {sceneOpen && (
+          <div className="absolute bottom-11 right-0 bg-black/60 backdrop-blur-xl rounded-xl border border-white/10 py-1 min-w-[100px] animate-fade-in">
+            {SCENE_LIST.map((s) => (
+              <button
+                key={s}
+                onClick={() => { setScene(s); setSceneOpen(false); }}
+                className={`w-full px-3 py-1.5 text-left text-xs flex items-center gap-2 transition-colors ${
+                  scene === s ? "text-[#FFF8F0]/80 bg-white/10" : "text-[#FFF8F0]/40 hover:text-[#FFF8F0]/60 hover:bg-white/5"
+                }`}
+              >
+                <span>{SCENES[s].emoji}</span>
+                <span>{SCENES[s].label}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
+      {/* Background gradient overlay */}
+      <div className="fixed inset-0 pointer-events-none z-0" style={{
+        background: sceneConfig.gradient,
+      }} />
+
       {/* Topic bar */}
-      <div className="absolute top-0 left-0 right-0 z-20 px-5 py-3 flex items-start justify-between">
-        <div>
-          <p className="text-[#3D2C1E]/60 text-sm font-medium">{topic}</p>
-          <p className="text-[#3D2C1E]/25 text-[10px]">房间 {roomId} · {aiParticipants.length} 个分身</p>
+      <div className="absolute top-0 left-0 right-0 z-20 px-5 py-3 flex items-center justify-between">
+        <div className="flex-1 min-w-0">
+          <p className="text-[#FFF8F0]/60 text-sm font-medium truncate">{topic}</p>
+          <p className="text-[#FFF8F0]/20 text-[10px]">{aiParticipants.length} 个分身围坐</p>
         </div>
-        {isSpectator ? (
-          <span className="shrink-0 mt-0.5 px-3 py-1 rounded-full text-[10px] bg-[#9B5DE5]/8 text-[#9B5DE5]/50">
-            旁听中
-          </span>
-        ) : (
+        <div className="flex items-center gap-2 shrink-0">
+          {/* Add AI button */}
+          {user?.name === hostName && (
+            <button
+              onClick={() => { setAddAiOpen(true); if (allAvatars.length === 0) fetch("/api/avatars").then((r) => r.json()).then((d) => Array.isArray(d) && setAllAvatars(d)).catch(() => {}); }}
+              className="px-2.5 py-1 rounded-full text-[10px] text-[#9B5DE5]/40 hover:text-[#9B5DE5]/70 hover:bg-[#9B5DE5]/8 transition-colors flex items-center gap-1"
+            >
+              + 分身
+            </button>
+          )}
+          {/* Share button */}
           <button
-            onClick={endRoom}
-            className="shrink-0 mt-0.5 px-3 py-1 rounded-full text-[10px] text-[#E76F51]/50 hover:text-[#E76F51] hover:bg-[#E76F51]/8 transition-colors"
+            onClick={() => setShareOpen(true)}
+            className="px-2.5 py-1 rounded-full text-[10px] text-[#FFF8F0]/30 hover:text-[#FFF8F0]/60 hover:bg-white/8 transition-colors flex items-center gap-1"
           >
-            结束会议
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8" />
+              <polyline points="16 6 12 2 8 6" />
+              <line x1="12" y1="2" x2="12" y2="15" />
+            </svg>
+            分享
           </button>
-        )}
+          {isSpectator ? (
+            <span className="px-3 py-1 rounded-full text-[10px] bg-[#9B5DE5]/15 text-[#9B5DE5]/50">
+              旁听中
+            </span>
+          ) : user?.name === hostName ? (
+            <button
+              onClick={endRoom}
+              className="px-3 py-1 rounded-full text-[10px] text-[#E76F51]/40 hover:text-[#E76F51] hover:bg-[#E76F51]/10 transition-colors"
+            >
+              {sceneConfig.endLabel}
+            </button>
+          ) : (
+            <button
+              onClick={leaveRoom}
+              className="px-3 py-1 rounded-full text-[10px] text-[#FFF8F0]/25 hover:text-[#FFF8F0]/50 hover:bg-white/5 transition-colors"
+            >
+              离开
+            </button>
+          )}
+        </div>
       </div>
 
       {/* No avatars hint */}
       {aiParticipants.length === 0 && (
         <div className="absolute top-1/3 left-0 right-0 text-center z-10">
-          <p className="text-[#3D2C1E]/20 text-sm">还没有分身参会</p>
-          <p className="text-[#3D2C1E]/15 text-xs mt-1">回首页选择分身后再创建会议</p>
+          <p className="text-[#FFF8F0]/20 text-sm">还没有分身参会</p>
+          <p className="text-[#FFF8F0]/12 text-xs mt-1">回首页选择分身后再创建会议</p>
         </div>
       )}
 
-      {/* AI participants */}
-      <div className="absolute top-16 left-0 right-0 px-8" style={{ height: "55%" }}>
+      {/* AI participants — elliptical seating with campfire at center */}
+      <div className="absolute z-[6] px-4" style={{ top: "48px", bottom: "160px", left: 0, right: 0 }}>
         <div className="relative w-full h-full">
-          {aiParticipants.map((ai, i) => {
-            const pos = getAiPosition(i, aiParticipants.length);
-            const isActive = activeAiId === ai.id;
+          {/* Center scene element */}
+          {scene !== "none" && (
+          <div className="absolute left-1/2 top-[50%] -translate-x-1/2 -translate-y-1/2 z-[1]">
+            <div className="relative flex items-center justify-center">
+              {scene === "campfire" && <Campfire width={100} height={120} intensity={0.6} />}
+              {scene === "forest" && <ForestScene width={120} height={140} intensity={0.7} />}
+              <div className={`absolute rounded-full ${
+                scene === "campfire" ? "w-24 h-24 bg-[#F4A261]/6 animate-campfire-glow" : "w-16 h-16 bg-[#4CAF50]/3 animate-forest-glow"
+              }`} />
+            </div>
+          </div>
+          )}
+
+
+          {allParticipants.map((p, i) => {
+            const pos = getParticipantPosition(i, allParticipants.length);
+            const isAi = p.type === "ai";
+            const isActive = activeAiId === p.id;
             const isThinking = isActive && activePhase === "thinking";
             const isStreaming = isActive && activePhase === "streaming";
             const isPlaying = isActive && activePhase === "playing";
-            const latestMsg = getLatestMessage(ai.id);
-            const showStream = isStreaming && aiStreamText;
+            const latestMsg = getLatestMessage(p.id);
+            const showSyncedText = isActive && revealedIdx >= 0 && sentencesRef.current.length > 0;
+            const isParticipantHost = p.name === hostName;
+            const borderColor = isAi ? "#9B5DE5" : "#F4A261";
+            const canKick = user?.name === hostName && p.name !== user?.name;
 
             return (
               <div
-                key={ai.id}
-                className="absolute -translate-x-1/2 flex flex-col items-center"
-                style={{ left: pos.left, top: "15%" }}
+                key={p.id}
+                className="absolute -translate-x-1/2 -translate-y-1/2 group"
+                style={{ left: pos.left, top: pos.top }}
               >
-                <div
-                  className={`
-                    w-16 h-16 rounded-full flex items-center justify-center text-xl font-bold overflow-hidden
-                    bg-[#9B5DE5]/15 border-2 transition-all duration-500
-                    ${isThinking ? "border-[#9B5DE5]/50 animate-ai-thinking" : ""}
-                    ${isStreaming || isPlaying ? "border-[#9B5DE5]/60 animate-speaking scale-105" : ""}
-                    ${!isActive ? "border-[#9B5DE5]/20 animate-breathe" : ""}
-                  `}
-                >
-                  {ai.avatar ? (
-                    <img src={ai.avatar} alt={ai.name} className="w-full h-full rounded-full object-cover" onError={(e) => { e.currentTarget.style.display = "none"; e.currentTarget.parentElement!.textContent = ai.name[0]; }} />
-                  ) : (
-                    <span className="text-[#9B5DE5]/60">{ai.name[0]}</span>
-                  )}
-                </div>
-                <span className="text-[10px] text-[#9B5DE5]/50 mt-1.5">{ai.name}</span>
-
-                {/* Stop button — visible during all active phases */}
-                {isActive && activePhase !== "idle" && (
-                  <button
-                    onClick={stopAI}
-                    className="mt-1.5 w-6 h-6 rounded-full bg-white/70 hover:bg-white text-[#E76F51]/50 hover:text-[#E76F51] flex items-center justify-center transition-colors shadow-sm"
-                  >
-                    <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
-                      <rect x="6" y="6" width="12" height="12" rx="2" />
-                    </svg>
-                  </button>
-                )}
-
-                {isThinking && (
-                  <div className="mt-2 dot-pulse text-[#9B5DE5]/40 text-lg">
-                    <span>·</span><span>·</span><span>·</span>
-                  </div>
-                )}
-
-                {(showStream || latestMsg) && (
-                  <div className="mt-2 max-w-[320px] w-[280px] relative">
+                {/* Fixed-size anchor: avatar + name (never changes height) */}
+                <div className="flex flex-col items-center">
+                  {/* Avatar */}
+                  <div className="relative">
                     <div
-                      ref={isActive ? bubbleRef : undefined}
-                      className={`max-h-[200px] overflow-y-auto backdrop-blur-sm rounded-2xl px-4 py-3 text-sm animate-fade-in leading-relaxed transition-all duration-500 ${
-                        isActive ? "bg-white/60 text-[#3D2C1E]/70" : "bg-white/30 text-[#3D2C1E]/35"
-                      }`}
+                      className={`
+                        w-12 h-12 sm:w-16 sm:h-16 rounded-full flex items-center justify-center text-lg sm:text-xl font-bold overflow-hidden
+                        border-2 transition-all duration-500
+                        ${isAi ? "bg-[#9B5DE5]/12" : "bg-[#F4A261]/12"}
+                        ${isThinking ? "animate-ai-thinking" : ""}
+                        ${isStreaming || isPlaying ? "animate-speaking scale-105" : ""}
+                        ${!isActive ? "animate-breathe" : ""}
+                      `}
+                      style={{ borderColor: isActive ? `${borderColor}99` : `${borderColor}40` }}
                     >
-                      {showStream ? aiStreamText : (
-                        isPlaying && playingSentenceIdx >= 0
-                          ? sentencesRef.current.map((s, si) => (
-                              <span key={si} data-idx={si} className={si === playingSentenceIdx ? "text-[#9B5DE5] font-medium" : ""}>{s}{" "}</span>
-                            ))
-                          : latestMsg?.text
+                      {p.avatar ? (
+                        <img src={p.avatar} alt={p.name} className="w-full h-full rounded-full object-cover" onError={(e) => { e.currentTarget.style.display = "none"; e.currentTarget.parentElement!.textContent = p.name[0]; }} />
+                      ) : (
+                        <span style={{ color: `${borderColor}99` }}>{p.name[0]}</span>
                       )}
                     </div>
-                    {isActive && bubbleOverflow && (
-                      <div className="absolute bottom-0 left-0 right-0 h-8 bg-gradient-to-t from-white/60 to-transparent rounded-b-2xl pointer-events-none flex items-end justify-center pb-1">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-[#9B5DE5]/30">
-                          <polyline points="6 9 12 15 18 9" />
-                        </svg>
-                      </div>
+                    {/* Menu button (host only, on hover) */}
+                    {canKick && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setMenuTarget({ name: p.name, type: p.type }); setConfirmKick(false); }}
+                        className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-black/50 hover:bg-black/70 text-[#FFF8F0]/40 hover:text-[#FFF8F0]/70 items-center justify-center transition-colors text-[10px] hidden group-hover:flex"
+                      >···</button>
                     )}
                   </div>
-                )}
+
+                  {/* Name + badges */}
+                  <div className="flex items-center gap-1 mt-1.5">
+                    <span className={`text-[10px] ${isAi ? "text-[#9B5DE5]/50" : "text-[#F4A261]/50"}`}>{p.name}</span>
+                    <span className={`text-[8px] px-1 py-0.5 rounded-full ${isAi ? "bg-[#9B5DE5]/15 text-[#9B5DE5]/50" : "bg-[#F4A261]/15 text-[#F4A261]/50"}`}>
+                      {isAi ? "分身" : "真人"}
+                    </span>
+                    {isParticipantHost && (
+                      <span className="text-[8px] px-1 py-0.5 rounded-full bg-[#FFD700]/15 text-[#FFD700]/70">主理人</span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Everything below floats absolute — doesn't push avatar up */}
+                <div className="absolute top-full left-1/2 -translate-x-1/2 flex flex-col items-center mt-1">
+                  {/* Stop button (AI only) */}
+                  {isAi && isActive && activePhase !== "idle" && (
+                    <button
+                      onClick={stopAI}
+                      className="mb-1 w-6 h-6 rounded-full bg-white/10 hover:bg-white/20 text-[#E76F51]/50 hover:text-[#E76F51] flex items-center justify-center transition-colors"
+                    >
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+                        <rect x="6" y="6" width="12" height="12" rx="2" />
+                      </svg>
+                    </button>
+                  )}
+
+                  {/* Thinking indicator (AI only) */}
+                  {isAi && (isThinking || (isStreaming && revealedIdx < 0)) && (
+                    <div className="mb-1 text-[#9B5DE5]/40 text-xs tracking-wide animate-fade-in">
+                      思考中...
+                    </div>
+                  )}
+
+                  {/* Message bubble */}
+                  {(() => {
+                    const isReplayingThis = replayingId === p.id;
+                    const showBubble = showSyncedText || isReplayingThis || (latestMsg && !isActive);
+                    if (!showBubble) return null;
+
+                    // During replay, split text into sentences for highlighting
+                    const replaySentences = isReplayingThis ? replaySentencesRef.current : [];
+
+                    return (
+                    <div className="max-w-[280px] w-[min(260px,45vw)] relative">
+                      <div
+                        ref={isActive ? bubbleRef : undefined}
+                        className={`max-h-[160px] sm:max-h-[200px] overflow-y-auto backdrop-blur-md rounded-2xl px-3 py-2 sm:px-4 sm:py-3 text-xs sm:text-sm animate-fade-in leading-relaxed transition-all duration-500 ${
+                          isActive || isReplayingThis ? "bg-black/40 text-[#FFF8F0]/80" : "bg-black/20 text-[#FFF8F0]/40"
+                        }`}
+                      >
+                        {showSyncedText
+                          ? sentencesRef.current.slice(0, revealedIdx + 1).map((s, si) => (
+                              <span key={si} data-idx={si} className={si === playingSentenceIdx ? "text-[#F4A261] font-medium animate-fade-in" : "animate-fade-in"}>{s}{" "}</span>
+                            ))
+                          : isReplayingThis
+                          ? replaySentences.map((s, si) => (
+                              <span key={si} className={si === replaySentenceIdx ? "text-[#9B5DE5] font-medium animate-fade-in" : si < replaySentenceIdx ? "text-[#FFF8F0]/60" : "text-[#FFF8F0]/30"}>{s}{" "}</span>
+                            ))
+                          : latestMsg?.text
+                        }
+                      </div>
+                      {/* Replay / Stop button */}
+                      {isAi && !isActive && latestMsg && (
+                        <button
+                          onClick={() => isReplayingThis ? stopReplay() : replayMessage(p.id, latestMsg!)}
+                          className={`absolute -bottom-1 -right-1 w-6 h-6 rounded-full flex items-center justify-center transition-colors ${
+                            isReplayingThis
+                              ? "bg-[#E76F51]/20 text-[#E76F51]/70 hover:bg-[#E76F51]/30"
+                              : "bg-white/10 text-[#9B5DE5]/50 hover:text-[#9B5DE5] hover:bg-white/20"
+                          }`}
+                          title={isReplayingThis ? "停止" : "重播"}
+                        >
+                          <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+                            {isReplayingThis
+                              ? <rect x="6" y="6" width="12" height="12" rx="2" />
+                              : <polygon points="5 3 19 12 5 21 5 3" />
+                            }
+                          </svg>
+                        </button>
+                      )}
+                      {isActive && bubbleOverflow && (
+                        <div className="absolute bottom-0 left-0 right-0 h-8 bg-gradient-to-t from-black/40 to-transparent rounded-b-2xl pointer-events-none flex items-end justify-center pb-1">
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-[#F4A261]/30">
+                            <polyline points="6 9 12 15 18 9" />
+                          </svg>
+                        </div>
+                      )}
+                    </div>
+                    );
+                  })()}
+                </div>
               </div>
             );
           })}
         </div>
       </div>
+
+      {/* History toggle button */}
+      <button
+        onClick={() => setHistoryOpen(!historyOpen)}
+        className="fixed right-4 top-1/2 -translate-y-1/2 z-30 w-8 h-8 rounded-full bg-white/8 hover:bg-white/15 text-[#FFF8F0]/30 hover:text-[#FFF8F0]/60 flex items-center justify-center transition-colors"
+        title="对话记录"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+        </svg>
+      </button>
+
+      {/* History sidebar */}
+      {historyOpen && (
+        <div className="fixed top-0 right-0 bottom-0 z-40 w-80 bg-[#1a120b]/95 backdrop-blur-xl shadow-2xl shadow-black/30 animate-slide-in-right flex flex-col">
+          <div className="p-4 flex items-center justify-between border-b border-[#FFF8F0]/6">
+            <h3 className="text-sm font-medium text-[#FFF8F0]/60">对话记录</h3>
+            <button
+              onClick={() => setHistoryOpen(false)}
+              className="text-[#FFF8F0]/20 hover:text-[#FFF8F0]/50 transition-colors text-lg"
+            >
+              ×
+            </button>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-4 space-y-3">
+            {messages.length === 0 ? (
+              <p className="text-[#FFF8F0]/15 text-xs text-center py-8">暂无对话</p>
+            ) : (
+              messages.map((msg) => {
+                const isAi = msg.senderType === "ai";
+                const avatar = isAi
+                  ? aiParticipants.find((a) => a.id === msg.senderId)?.avatar
+                  : user?.avatar;
+                const isCurrentlyPlaying = playingMsgId === msg.id;
+
+                return (
+                  <div key={msg.id} className="flex gap-2.5 animate-fade-in">
+                    {/* Avatar */}
+                    <div className={`w-7 h-7 rounded-full shrink-0 flex items-center justify-center text-[10px] font-bold overflow-hidden border ${
+                      isAi ? "border-[#9B5DE5]/30 bg-[#9B5DE5]/10" : "border-[#F4A261]/30 bg-[#F4A261]/10"
+                    }`}>
+                      {avatar ? (
+                        <img src={avatar} alt={msg.sender} className="w-full h-full rounded-full object-cover" />
+                      ) : (
+                        <span className={isAi ? "text-[#9B5DE5]/50" : "text-[#F4A261]/50"}>{msg.sender[0]}</span>
+                      )}
+                    </div>
+
+                    {/* Content */}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-0.5">
+                        <span className={`text-[11px] font-medium ${isAi ? "text-[#9B5DE5]/60" : "text-[#F4A261]/60"}`}>
+                          {msg.sender}
+                        </span>
+                        <span className="text-[10px] text-[#FFF8F0]/15">
+                          {new Date(msg.timestamp).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}
+                        </span>
+                        {/* Play button — AI: on-demand TTS; Human: play stored recording */}
+                        {(isAi || msg.ttsAudioUrl) && (
+                          <button
+                            onClick={async () => {
+                              if (isCurrentlyPlaying) {
+                                historyAudioRef.current?.pause();
+                                setPlayingMsgId(null);
+                                return;
+                              }
+                              if (historyAudioRef.current) historyAudioRef.current.pause();
+                              setPlayingMsgId(msg.id);
+
+                              if (msg.ttsAudioUrl) {
+                                // Parse URLs — could be JSON array (AI) or single URL (human recording)
+                                let urls: string[];
+                                try {
+                                  const parsed = JSON.parse(msg.ttsAudioUrl);
+                                  urls = Array.isArray(parsed) ? parsed : [msg.ttsAudioUrl];
+                                } catch {
+                                  urls = [msg.ttsAudioUrl];
+                                }
+
+                                if (urls.length === 1) {
+                                  // Single audio — play directly
+                                  const audio = new Audio(urls[0]);
+                                  audio.onended = () => setPlayingMsgId(null);
+                                  audio.play().catch(() => setPlayingMsgId(null));
+                                  historyAudioRef.current = audio;
+                                } else {
+                                  // Multiple audio segments — play sequentially via queue
+                                  const hQueue = audioQueueRef.current;
+                                  hQueue.stop();
+                                  hQueue.onPlay = () => {};
+                                  hQueue.onFinish = () => setPlayingMsgId(null);
+                                  urls.forEach((url, si) => hQueue.enqueue(url, si));
+                                  hQueue.seal();
+                                  hQueue.startPlayback();
+                                }
+                              } else if (isAi) {
+                                // No stored URL — generate TTS on demand
+                                const sentences = splitIntoSentences(msg.text);
+                                const hQueue = audioQueueRef.current;
+                                hQueue.stop();
+                                hQueue.onPlay = () => {};
+                                hQueue.onFinish = () => setPlayingMsgId(null);
+                                for (let si = 0; si < sentences.length; si++) {
+                                  try {
+                                    const res = await fetch("/api/tts", {
+                                      method: "POST",
+                                      headers: { "Content-Type": "application/json" },
+                                      body: JSON.stringify({ text: sentences[si], avatarId: msg.senderId }),
+                                    });
+                                    const ttsData = await res.json();
+                                    const url = ttsData.data?.audioUrl || ttsData.data?.url;
+                                    if (url) hQueue.enqueue(url, si);
+                                  } catch { /* skip */ }
+                                }
+                                hQueue.seal();
+                                hQueue.startPlayback();
+                              } else {
+                                setPlayingMsgId(null);
+                              }
+                            }}
+                            className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] transition-colors ${
+                              isCurrentlyPlaying ? "text-[#F4A261] bg-[#F4A261]/10" : "text-[#FFF8F0]/25 hover:text-[#FFF8F0]/50 hover:bg-white/5"
+                            }`}
+                          >
+                            <svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor">
+                              {isCurrentlyPlaying ? (
+                                <><rect x="6" y="4" width="4" height="16" rx="1" /><rect x="14" y="4" width="4" height="16" rx="1" /></>
+                              ) : (
+                                <polygon points="5 3 19 12 5 21 5 3" />
+                              )}
+                            </svg>
+                            {isCurrentlyPlaying ? "暂停" : "播放"}
+                          </button>
+                        )}
+                      </div>
+                      <p className={`text-[12px] leading-relaxed ${
+                        activeAiId === msg.senderId ? "text-[#FFF8F0]/70" : "text-[#FFF8F0]/40"
+                      }`}>
+                        {msg.text}
+                      </p>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+            <div ref={historyEndRef} />
+          </div>
+        </div>
+      )}
 
       {/* Human area — hidden for spectators */}
       {!isSpectator && (
@@ -745,7 +1281,7 @@ export default function RoomPage() {
         {/* Text input/display area */}
         <div className="mb-4 max-w-[320px] w-[280px]">
           {textEditing ? (
-            <div className="bg-white/70 backdrop-blur-sm rounded-2xl px-3 py-2 flex items-end gap-2 shadow-sm border border-[#F4A261]/20">
+            <div className="bg-white/10 backdrop-blur-md rounded-2xl px-3 py-2 flex items-end gap-2 border border-[#F4A261]/15">
               <textarea
                 value={editText}
                 onChange={(e) => { setEditText(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px"; }}
@@ -764,11 +1300,11 @@ export default function RoomPage() {
                 autoFocus
                 rows={1}
                 placeholder="输入消息..."
-                className="flex-1 bg-transparent text-sm text-[#3D2C1E]/70 outline-none placeholder:text-[#3D2C1E]/20 resize-none leading-relaxed"
+                className="flex-1 bg-transparent text-sm text-[#FFF8F0]/70 outline-none placeholder:text-[#FFF8F0]/20 resize-none leading-relaxed"
               />
               <button
                 onClick={() => { setEditText(""); setTextEditing(false); }}
-                className="shrink-0 w-6 h-6 rounded-full text-[#3D2C1E]/20 hover:text-[#3D2C1E]/50 hover:bg-[#3D2C1E]/5 flex items-center justify-center transition-colors text-xs"
+                className="shrink-0 w-6 h-6 rounded-full text-[#FFF8F0]/20 hover:text-[#FFF8F0]/50 flex items-center justify-center transition-colors text-xs"
               >
                 ×
               </button>
@@ -791,16 +1327,25 @@ export default function RoomPage() {
             </div>
           ) : (
             <div
-              className="bg-white/40 backdrop-blur-sm rounded-2xl px-4 py-2.5 text-sm text-center cursor-text min-h-[40px] flex items-center justify-center"
+              className="bg-white/8 backdrop-blur-md rounded-2xl px-4 py-2.5 text-sm text-center cursor-text min-h-[40px] flex items-center justify-center border border-[#F4A261]/8"
               onClick={() => {
+                // If mic is active, stop it silently (no auto-send)
+                if (isListening) {
+                  suppressFinalRef.current = true;
+                  recognitionRef.current?.stop();
+                  recognitionRef.current = null;
+                  setIsListening(false);
+                  recorderRef.current.stop().catch(() => {});
+                }
                 setTextEditing(true);
                 setEditText(interimText || "");
+                setInterimText("");
               }}
             >
               {sentFlash ? (
                 <span className="text-[#F4A261]/70 animate-fade-in text-xs font-medium">已发送</span>
               ) : (
-                <span className={interimText ? "text-[#3D2C1E]/60 animate-fade-in" : "text-[#3D2C1E]/20"}>
+                <span className={interimText ? "text-[#FFF8F0]/60 animate-fade-in" : "text-[#FFF8F0]/20"}>
                   {interimText || getLatestMessage(user?.name || "me")?.text || "点击输入..."}
                 </span>
               )}
@@ -812,7 +1357,7 @@ export default function RoomPage() {
           <div
             className={`
               w-14 h-14 rounded-full flex items-center justify-center text-lg font-bold overflow-hidden
-              bg-[#F4A261]/15 border-2 transition-all duration-300
+              bg-[#F4A261]/12 border-2 transition-all duration-300
               ${isListening ? "border-[#F4A261] animate-speaking scale-105" : "border-[#F4A261]/25"}
             `}
           >
@@ -829,7 +1374,7 @@ export default function RoomPage() {
               w-14 h-14 rounded-full flex items-center justify-center transition-all duration-300 shadow-lg
               ${isListening
                 ? "bg-[#E76F51] text-white animate-pulse-glow scale-110 shadow-[#E76F51]/30"
-                : "bg-white/70 text-[#3D2C1E]/40 hover:bg-white hover:text-[#3D2C1E]/60 shadow-black/5"
+                : "bg-white/10 text-[#FFF8F0]/40 hover:bg-white/15 hover:text-[#FFF8F0]/60 shadow-black/20"
               }
             `}
           >
@@ -847,15 +1392,124 @@ export default function RoomPage() {
             </svg>
           </button>
 
-          <span className="text-xs text-[#3D2C1E]/30">{user?.name || ""}</span>
+          <div className="flex items-center gap-1">
+            <span className="text-xs text-[#FFF8F0]/25">{user?.name || ""}</span>
+            {user?.name === hostName && (
+              <span className="text-[8px] px-1 py-0.5 rounded-full bg-[#FFD700]/15 text-[#FFD700]/70">主理人</span>
+            )}
+          </div>
         </div>
 
         {!isListening && (
-          <p className="mt-3 text-[#3D2C1E]/15 text-[11px]">
+          <p className="mt-3 text-[#FFF8F0]/15 text-[11px]">
             {activePhase !== "idle" ? "随时插话..." : "点击麦克风或输入文字"}
           </p>
         )}
       </div>
+      )}
+
+      {/* Participant context menu + kick confirmation */}
+      {menuTarget && (
+        <div className="fixed inset-0 z-50" onClick={() => { setMenuTarget(null); setConfirmKick(false); }}>
+          <div className="absolute inset-0" />
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2" onClick={(e) => e.stopPropagation()}>
+            {!confirmKick ? (
+              <div className="bg-[#2a1f15]/95 backdrop-blur-xl rounded-2xl shadow-2xl border border-[#FFF8F0]/8 p-1 min-w-[140px] animate-fade-in">
+                <p className="px-3 py-1.5 text-[11px] text-[#FFF8F0]/40 border-b border-[#FFF8F0]/6">{menuTarget.name}</p>
+                <button
+                  onClick={() => setConfirmKick(true)}
+                  className="w-full px-3 py-2 text-left text-xs text-[#E76F51]/70 hover:bg-[#E76F51]/10 rounded-xl transition-colors"
+                >
+                  移出房间
+                </button>
+              </div>
+            ) : (
+              <div className="bg-[#2a1f15]/95 backdrop-blur-xl rounded-2xl shadow-2xl border border-[#FFF8F0]/8 p-4 min-w-[200px] animate-fade-in text-center">
+                <p className="text-sm text-[#FFF8F0]/70 mb-1">确定移出</p>
+                <p className="text-xs text-[#FFF8F0]/30 mb-4">{menuTarget.name}</p>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => { setMenuTarget(null); setConfirmKick(false); }}
+                    className="flex-1 py-2 rounded-xl text-xs text-[#FFF8F0]/40 hover:bg-white/5 transition-colors"
+                  >取消</button>
+                  <button
+                    onClick={async () => {
+                      await fetch(`/api/rooms/${roomId}/kick`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ name: menuTarget.name, type: menuTarget.type, requestedBy: user?.name }),
+                      }).catch(() => {});
+                      // Update local state
+                      if (menuTarget.type === "ai") {
+                        setAiParticipants((prev) => prev.filter((a) => a.name !== menuTarget.name));
+                      } else {
+                        setOtherHumans((prev) => prev.filter((h) => h.name !== menuTarget.name));
+                      }
+                      setMenuTarget(null);
+                      setConfirmKick(false);
+                    }}
+                    className="flex-1 py-2 rounded-xl text-xs bg-[#E76F51]/20 text-[#E76F51] hover:bg-[#E76F51]/30 transition-colors"
+                  >确定移出</button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Add AI drawer */}
+      {addAiOpen && (
+        <div className="fixed inset-0 z-50" onClick={() => setAddAiOpen(false)}>
+          <div className="absolute inset-0 bg-black/20" />
+          <div className="absolute bottom-0 left-0 right-0 max-h-[50vh] bg-[#1a120b]/95 backdrop-blur-xl rounded-t-3xl shadow-2xl animate-slide-up" onClick={(e) => e.stopPropagation()}>
+            <div className="p-4">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-medium text-[#FFF8F0]/60">加入分身</h3>
+                <button onClick={() => setAddAiOpen(false)} className="text-[#FFF8F0]/20 hover:text-[#FFF8F0]/50 text-lg">×</button>
+              </div>
+              <div className="space-y-1.5 max-h-[35vh] overflow-y-auto">
+                {allAvatars
+                  .filter((a) => !aiParticipants.some((p) => p.id === a.id))
+                  .map((a) => (
+                    <div
+                      key={a.id}
+                      onClick={async () => {
+                        await fetch(`/api/rooms/${roomId}/join`, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ name: a.name, type: "ai", avatarId: a.id }),
+                        }).catch(() => {});
+                        // Immediately update local state
+                        setAiParticipants((prev) => [...prev, { id: a.id, name: a.name, avatar: a.avatar_url, type: "ai" }]);
+                        setAddAiOpen(false);
+                      }}
+                      className="flex items-center gap-2.5 px-2.5 py-2 rounded-xl bg-white/5 hover:bg-white/10 transition-colors cursor-pointer"
+                    >
+                      <div className="w-9 h-9 rounded-full bg-[#9B5DE5]/12 flex items-center justify-center text-xs font-bold text-[#9B5DE5]/50 shrink-0 overflow-hidden">
+                        {a.avatar_url ? (
+                          <img src={a.avatar_url} alt={a.name} className="w-full h-full rounded-full object-cover" />
+                        ) : a.name[0]}
+                      </div>
+                      <span className="text-sm text-[#FFF8F0]/60 flex-1 truncate">{a.name}</span>
+                      <span className="text-[10px] text-[#9B5DE5]/40">+ 加入</span>
+                    </div>
+                  ))}
+                {allAvatars.filter((a) => !aiParticipants.some((p) => p.id === a.id)).length === 0 && (
+                  <p className="text-[#FFF8F0]/15 text-xs text-center py-4">没有更多分身可加入</p>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Share sheet */}
+      {shareOpen && (
+        <ShareSheet
+          roomId={roomId}
+          topic={topic}
+          participantNames={allParticipants.map((p) => p.name)}
+          onClose={() => setShareOpen(false)}
+        />
       )}
     </main>
   );

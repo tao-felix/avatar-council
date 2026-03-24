@@ -63,6 +63,12 @@ body {
 }
 .animate-slide-in-right { animation: slide-in-right 0.25s ease-out forwards; }
 
+@keyframes slide-up {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+.animate-slide-up { animation: slide-up 0.3s ease-out forwards; }
+
 @keyframes bounce-slow {
   0%, 100% { transform: translateY(0); }
   50% { transform: translateY(6px); }
@@ -80,3 +86,67 @@ body {
   50% { box-shadow: 0 0 0 3px rgba(155, 93, 229, 0.15); }
 }
 .animate-speaking-glow { animation: speaking-glow-purple 2.5s ease-in-out infinite; }
+
+@keyframes campfire-glow {
+  0%, 100% {
+    box-shadow: 0 0 12px 4px rgba(244, 162, 97, 0.25), 0 0 30px 8px rgba(244, 162, 97, 0.1);
+    transform: scale(1);
+  }
+  50% {
+    box-shadow: 0 0 18px 6px rgba(244, 162, 97, 0.4), 0 0 45px 12px rgba(231, 111, 81, 0.15);
+    transform: scale(1.05);
+  }
+}
+.animate-campfire-glow { animation: campfire-glow 2s ease-in-out infinite; }
+
+@keyframes forest-glow {
+  0%, 100% {
+    box-shadow: 0 0 12px 4px rgba(76, 175, 80, 0.2), 0 0 30px 8px rgba(76, 175, 80, 0.08);
+    transform: scale(1);
+  }
+  50% {
+    box-shadow: 0 0 18px 6px rgba(76, 175, 80, 0.35), 0 0 45px 12px rgba(56, 142, 60, 0.12);
+    transform: scale(1.05);
+  }
+}
+.animate-forest-glow { animation: forest-glow 3s ease-in-out infinite; }
+
+/* Voice wave bars — "live" indicator */
+@keyframes voice-bar {
+  0%, 100% { height: 3px; }
+  50% { height: var(--bar-h, 16px); }
+}
+.voice-wave {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  height: 24px;
+}
+.voice-wave span {
+  width: 3px;
+  border-radius: 1.5px;
+  background: currentColor;
+  animation: voice-bar 0.7s ease-in-out infinite;
+}
+.voice-wave span:nth-child(1) { --bar-h: 10px; animation-delay: 0s; }
+.voice-wave span:nth-child(2) { --bar-h: 20px; animation-delay: 0.12s; }
+.voice-wave span:nth-child(3) { --bar-h: 14px; animation-delay: 0.28s; }
+.voice-wave span:nth-child(4) { --bar-h: 22px; animation-delay: 0.08s; }
+.voice-wave span:nth-child(5) { --bar-h: 8px; animation-delay: 0.2s; }
+.voice-wave span:nth-child(6) { --bar-h: 18px; animation-delay: 0.35s; }
+.voice-wave span:nth-child(7) { --bar-h: 12px; animation-delay: 0.15s; }
+
+@keyframes bubble-pop {
+  0% { opacity: 0; transform: scale(0.7) translateY(4px); }
+  15% { opacity: 1; transform: scale(1) translateY(0); }
+  75% { opacity: 1; transform: scale(1) translateY(0); }
+  100% { opacity: 0; transform: scale(0.9) translateY(-6px); }
+}
+.animate-bubble { animation: bubble-pop 2.5s ease-out forwards; }
+
+@keyframes slide-up {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+.animate-slide-up { animation: slide-up 0.3s ease-out forwards; }
+

@@ -1,7 +1,12 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
+import { Campfire } from "@/components/Campfire";
+import { SceneAudio } from "@/components/SceneAudio";
+import { SCENES, SCENE_LIST, type SceneType } from "@/lib/scenes";
+import { ChatBubbles } from "@/components/ChatBubbles";
+import { Header } from "@/components/Header";
 
 function getCookie(name: string) {
   if (typeof document === "undefined") return null;
@@ -14,6 +19,7 @@ export interface AvatarInfo {
   name: string;
   avatar_url: string;
   route: string;
+  bio: string;
   likes: number;
 }
 
@@ -25,6 +31,7 @@ interface RoomInfo {
   started_at: string;
   ended_at: string | null;
   is_public: boolean;
+  message_count?: number;
   avatar_participants: { id: string; name: string; avatar_url: string }[];
   human_participants: { name: string; avatar: string }[];
 }
@@ -60,6 +67,29 @@ export default function Home() {
   const [isPublicRoom, setIsPublicRoom] = useState(true);
   const [topicFocused, setTopicFocused] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
+  const [expandedAvatarId, setExpandedAvatarId] = useState<string | null>(null);
+  const [showCreate, setShowCreate] = useState(false);
+  const [scene, setScene] = useState<SceneType>("campfire");
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  const previewScene = (s: SceneType) => {
+    // Stop any playing preview
+    if (previewAudioRef.current) {
+      previewAudioRef.current.pause();
+      previewAudioRef.current = null;
+    }
+    setScene(s);
+    const src = SCENES[s].audioSrc;
+    if (src) {
+      const audio = new Audio(src);
+      audio.volume = 0.2;
+      audio.loop = false;
+      // Play 5 seconds preview
+      audio.play().catch(() => {});
+      setTimeout(() => { audio.pause(); audio.currentTime = 0; }, 5000);
+      previewAudioRef.current = audio;
+    }
+  };
 
   useEffect(() => {
     const raw = getCookie("sm_user");
@@ -151,6 +181,7 @@ export default function Home() {
           avatarParticipants: selectedAvatars.map((a) => ({ id: a.id, name: a.name, avatar_url: a.avatar_url })),
           humanParticipants: user ? [{ name: user.name, avatar: user.avatar }] : [],
           isPublic: isPublicRoom,
+          scene,
         }),
       });
       router.push(`/room/${roomId}`);
@@ -165,11 +196,11 @@ export default function Home() {
   };
 
   return (
-    <main className="min-h-screen bg-[#FEF3E2] relative">
+    <main className="min-h-screen relative bg-[#1a120b]">
       {/* Onboarding modal */}
       {showOnboarding && (
         <div className="fixed inset-0 z-50 bg-black/20 backdrop-blur-sm flex items-center justify-center px-6" onClick={() => { localStorage.setItem("avatar_council_onboarded", "1"); setShowOnboarding(false); }}>
-          <div className="bg-[#FEF3E2] rounded-3xl shadow-2xl max-w-sm w-full p-8 animate-fade-in" onClick={(e) => e.stopPropagation()}>
+          <div className="bg-[#2a1f15] rounded-3xl shadow-2xl max-w-sm w-full p-8 animate-fade-in border border-[#F4A261]/10" onClick={(e) => e.stopPropagation()}>
             {/* Avatar faces */}
             <div className="flex justify-center -space-x-2 mb-5">
               {avatars.slice(0, 4).map((a, i) => (
@@ -183,20 +214,20 @@ export default function Home() {
               ))}
             </div>
 
-            <h2 className="text-xl font-bold text-[#3D2C1E] text-center mb-4">欢迎来到分身议事</h2>
+            <h2 className="text-xl font-bold text-[#FFF8F0]/85 text-center mb-4">欢迎来到篝火会</h2>
 
             <div className="space-y-3 mb-8">
               <div className="flex items-start gap-3">
-                <span className="text-base mt-0.5">🎙</span>
-                <p className="text-sm text-[#3D2C1E]/60">选择 AI 分身，开启语音圆桌</p>
+                <span className="text-base mt-0.5">🔥</span>
+                <p className="text-sm text-[#FFF8F0]/50">点燃篝火，召唤 AI 分身围坐而谈</p>
               </div>
               <div className="flex items-start gap-3">
                 <span className="text-base mt-0.5">💬</span>
-                <p className="text-sm text-[#3D2C1E]/60">分身会自主讨论，你随时插话</p>
+                <p className="text-sm text-[#FFF8F0]/50">分身自主讨论，你随时插话</p>
               </div>
               <div className="flex items-start gap-3">
-                <span className="text-base mt-0.5">🌐</span>
-                <p className="text-sm text-[#3D2C1E]/60">发现公开房间，旁听精彩对话</p>
+                <span className="text-base mt-0.5">👀</span>
+                <p className="text-sm text-[#FFF8F0]/50">发现正在进行的篝火，加入旁听</p>
               </div>
             </div>
 
@@ -210,31 +241,29 @@ export default function Home() {
         </div>
       )}
 
-      {/* Ambient */}
-      <div className="fixed inset-0 pointer-events-none">
-        <div className="absolute top-1/4 left-1/3 w-80 h-80 bg-[#9B5DE5]/6 rounded-full blur-[100px]" />
-        <div className="absolute bottom-1/3 right-1/4 w-72 h-72 bg-[#F4A261]/8 rounded-full blur-[80px]" />
-      </div>
+      {/* Header */}
+      <Header dark />
+
+      {/* Campfire ambient audio — landing page only */}
+      {!user && <SceneAudio audioSrc="/ambient/campfire.mp3" />}
+
+      {/* Night sky + campfire light — only on landing page */}
+      <div className="fixed inset-0 pointer-events-none z-0" style={{
+        background: user
+          ? `radial-gradient(ellipse 80% 60% at 50% 30%, rgba(244, 162, 97, 0.06) 0%, transparent 70%),
+             radial-gradient(ellipse at center, rgba(30, 22, 14, 0.2) 0%, rgba(20, 14, 8, 0.6) 100%)`
+          : `radial-gradient(ellipse 60% 50% at 50% 40%, rgba(244, 162, 97, 0.12) 0%, transparent 70%),
+             radial-gradient(ellipse 40% 35% at 50% 42%, rgba(231, 111, 81, 0.08) 0%, transparent 60%),
+             radial-gradient(ellipse at center, rgba(30, 22, 14, 0.4) 0%, rgba(20, 14, 8, 0.85) 100%)`,
+      }} />
 
       {/* Top bar with drawer toggle */}
       {user && (
-        <div className="fixed top-0 left-0 right-0 z-30 flex items-center justify-between px-5 py-3 bg-[#FEF3E2]/80 backdrop-blur-sm">
-          <p className="text-[#3D2C1E]/40 text-xs">
-            Hi, {user.name}
-            <button
-              onClick={() => {
-                document.cookie = "sm_token=; max-age=0; path=/";
-                document.cookie = "sm_user=; max-age=0; path=/";
-                setUser(null);
-              }}
-              className="ml-2 text-[#3D2C1E]/20 hover:text-[#3D2C1E]/50 transition-colors underline"
-            >
-              登出
-            </button>
-          </p>
+        <div className="fixed top-0 left-0 right-0 z-30 flex items-center justify-end px-5 py-3">
+          <div className="flex items-center gap-3">
           <button
             onClick={() => setDrawerOpen(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/50 hover:bg-white/70 text-[#9B5DE5]/60 hover:text-[#9B5DE5] text-xs transition-colors"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/10 hover:bg-white/15 text-[#F4A261]/50 hover:text-[#F4A261] text-xs transition-colors"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
@@ -242,25 +271,26 @@ export default function Home() {
               <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
               <path d="M16 3.13a4 4 0 0 1 0 7.75" />
             </svg>
-            分身 {avatars.length > 0 && <span className="text-[#3D2C1E]/25">{avatars.length}</span>}
+            分身 {avatars.length > 0 && <span className="text-[#FFF8F0]/20">{avatars.length}</span>}
           </button>
+          </div>
         </div>
       )}
 
       {/* Right drawer — avatar list */}
       {drawerOpen && (
-        <div className="fixed inset-0 z-40" onClick={() => setDrawerOpen(false)}>
+        <div className="fixed inset-0 z-50" onClick={() => setDrawerOpen(false)}>
           <div className="absolute inset-0 bg-black/10" />
           <div
-            className="absolute top-0 right-0 bottom-0 w-72 bg-[#FEF3E2]/95 backdrop-blur-xl shadow-2xl shadow-black/10 animate-slide-in-right"
+            className="absolute top-0 right-0 bottom-0 w-72 bg-[#1a120b]/95 backdrop-blur-xl shadow-2xl shadow-black/30 animate-slide-in-right"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="p-4 h-full flex flex-col">
               <div className="flex items-center justify-between mb-3">
-                <h3 className="text-sm font-medium text-[#3D2C1E]/70">分身列表</h3>
+                <h3 className="text-sm font-medium text-[#FFF8F0]/60">分身列表</h3>
                 <button
                   onClick={() => setDrawerOpen(false)}
-                  className="text-[#3D2C1E]/20 hover:text-[#3D2C1E]/50 transition-colors text-lg"
+                  className="text-[#FFF8F0]/20 hover:text-[#FFF8F0]/50 transition-colors text-lg"
                 >
                   ×
                 </button>
@@ -271,7 +301,7 @@ export default function Home() {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="搜索分身..."
-                className="w-full bg-white/60 border border-[#9B5DE5]/10 rounded-xl px-3 py-2 text-sm text-[#3D2C1E] placeholder:text-[#3D2C1E]/20 outline-none focus:border-[#9B5DE5]/30 mb-3"
+                className="w-full bg-white/8 border border-[#F4A261]/10 rounded-xl px-3 py-2 text-sm text-[#FFF8F0]/70 placeholder:text-[#FFF8F0]/20 outline-none focus:border-[#F4A261]/25 mb-3"
               />
 
               <div className="flex-1 overflow-y-auto space-y-1.5 -mx-1 px-1">
@@ -280,32 +310,60 @@ export default function Home() {
                 ) : filteredAvatars.length === 0 ? (
                   <p className="text-[#3D2C1E]/20 text-xs text-center py-4">暂无分身</p>
                 ) : (
-                  filteredAvatars.map((a) => (
+                  filteredAvatars.map((a) => {
+                    const isExpanded = expandedAvatarId === a.id;
+                    const fireCount = rooms.filter((r) => r.avatar_participants.some((p) => p.id === a.id) || r.human_participants.some((p) => p.name === a.name)).length;
+                    return (
                     <div
                       key={a.id}
-                      className="flex items-center gap-2.5 px-2.5 py-2 rounded-xl bg-white/40 hover:bg-white/60 transition-colors"
+                      className="rounded-xl bg-white/5 hover:bg-white/10 transition-colors cursor-pointer"
+                      onClick={() => setExpandedAvatarId(isExpanded ? null : a.id)}
                     >
-                      <div className="w-9 h-9 rounded-full bg-[#9B5DE5]/12 flex items-center justify-center text-xs font-bold text-[#9B5DE5]/50 shrink-0 overflow-hidden">
-                        {a.avatar_url ? (
-                          <img src={a.avatar_url} alt={a.name} className="w-full h-full rounded-full object-cover" />
-                        ) : (
-                          a.name[0]
-                        )}
+                      <div className="flex items-center gap-2.5 px-2.5 py-2">
+                        <div className="w-9 h-9 rounded-full bg-[#F4A261]/12 flex items-center justify-center text-xs font-bold text-[#F4A261]/50 shrink-0 overflow-hidden">
+                          {a.avatar_url ? (
+                            <img src={a.avatar_url} alt={a.name} className="w-full h-full rounded-full object-cover" />
+                          ) : (
+                            a.name[0]
+                          )}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-sm text-[#FFF8F0]/60 truncate">{a.name}</span>
+                            {fireCount > 0 && <span className="text-[9px] text-[#F4A261]/35">🔥{fireCount}</span>}
+                          </div>
+                          {a.bio && !isExpanded && <span className="text-[10px] text-[#FFF8F0]/20 truncate block">{a.bio.slice(0, 30)}</span>}
+                        </div>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); toggleLike(a.id); }}
+                          className="flex items-center gap-1 text-xs transition-colors shrink-0"
+                        >
+                          <span className={likedIds.has(a.id) ? "text-red-400" : "text-[#FFF8F0]/20 hover:text-red-300"}>
+                            {likedIds.has(a.id) ? "♥" : "♡"}
+                          </span>
+                          {a.likes > 0 && (
+                            <span className="text-[#FFF8F0]/20">{a.likes}</span>
+                          )}
+                        </button>
                       </div>
-                      <span className="text-sm text-[#3D2C1E]/60 flex-1 truncate">{a.name}</span>
-                      <button
-                        onClick={() => toggleLike(a.id)}
-                        className="flex items-center gap-1 text-xs transition-colors shrink-0"
-                      >
-                        <span className={likedIds.has(a.id) ? "text-red-400" : "text-[#3D2C1E]/20 hover:text-red-300"}>
-                          {likedIds.has(a.id) ? "♥" : "♡"}
-                        </span>
-                        {a.likes > 0 && (
-                          <span className="text-[#3D2C1E]/25">{a.likes}</span>
-                        )}
-                      </button>
+                      {isExpanded && (
+                        <div className="px-3 pb-3 animate-fade-in">
+                          {a.bio && <p className="text-[11px] text-[#FFF8F0]/35 mb-2 leading-relaxed">{a.bio}</p>}
+                          {a.route && (
+                            <a
+                              href={`https://second.me/${a.route}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              onClick={(e) => e.stopPropagation()}
+                              className="inline-flex items-center gap-1 text-[10px] text-[#F4A261]/60 hover:text-[#F4A261] transition-colors"
+                            >
+                              <span>去 SecondMe 交流 →</span>
+                            </a>
+                          )}
+                        </div>
+                      )}
                     </div>
-                  ))
+                  )})
                 )}
               </div>
             </div>
@@ -313,121 +371,111 @@ export default function Home() {
         </div>
       )}
 
-      {/* Hero section — exactly one viewport tall */}
-      <div className="relative z-10 flex flex-col items-center justify-center h-screen px-6 overflow-hidden">
+      {/* Hero section */}
+      <div className={`relative z-10 flex flex-col items-center justify-center px-6 overflow-hidden ${user ? "pt-20 pb-6" : "h-screen"}`}>
         <div className="text-center max-w-sm w-full">
           {!user ? (
             /* ── Logged-out: The Gathering ── */
             <div className="flex flex-col items-center">
-              {/* Avatar arc */}
-              {loading || avatars.length === 0 ? (
-                <div className="mb-6 flex items-center justify-center gap-2">
-                  <div className="w-11 h-11 rounded-full bg-[#9B5DE5]/50 animate-breathe" />
-                  <div className="w-9 h-9 rounded-full bg-[#F4A261]/50 animate-breathe" style={{ animationDelay: "0.5s" }} />
+              {/* Campfire scene — all elements centered at 50%/50% */}
+              <div className="relative w-60 h-52 mb-2">
+                {/* Canvas particle fire — centered */}
+                <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-10">
+                  <Campfire width={120} height={140} intensity={0.8} />
                 </div>
-              ) : (
-                <div className="relative w-52 h-36 mb-6">
-                  {avatars.slice(0, 6).map((a, i) => {
-                    const count = Math.min(avatars.length, 6);
-                    const angle = count > 1 ? (Math.PI / (count - 1)) * i : Math.PI / 2;
-                    const x = Math.cos(angle) * 85;
-                    const y = -Math.sin(angle) * 40;
-                    return (
-                      <div
-                        key={a.id}
-                        className={`absolute w-11 h-11 rounded-full overflow-hidden border-2 border-white/60 animate-float ${i % 3 === 0 ? "animate-speaking-glow" : ""}`}
-                        style={{
-                          left: `calc(50% + ${x}px - 22px)`,
-                          top: `calc(50% + ${y}px - 22px)`,
-                          animationDelay: `${i * 0.4}s`,
-                          opacity: 0,
-                          animation: `fade-in-up 0.4s ease-out ${i * 0.15}s forwards, float 3s ease-in-out ${i * 0.4}s infinite${i % 3 === 0 ? ", speaking-glow-purple 2.5s ease-in-out infinite" : ""}`,
-                        }}
-                      >
-                        {a.avatar_url ? (
-                          <img src={a.avatar_url} alt={a.name} className="w-full h-full object-cover" />
-                        ) : (
-                          <div className="w-full h-full bg-[#9B5DE5]/15 flex items-center justify-center text-sm font-bold text-[#9B5DE5]/50">
-                            {a.name[0]}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                  {/* Typing dots in center */}
-                  <div className="dot-pulse absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 flex gap-0.5">
-                    <span className="w-1 h-1 rounded-full bg-[#9B5DE5]/25" />
-                    <span className="w-1 h-1 rounded-full bg-[#9B5DE5]/25" />
-                    <span className="w-1 h-1 rounded-full bg-[#9B5DE5]/25" />
-                  </div>
-                </div>
-              )}
 
-              <h1 className="text-3xl font-bold mb-2 text-[#3D2C1E] tracking-tight">分身议事</h1>
-              <p className="text-[#3D2C1E]/50 text-sm mb-1 opacity-0 animate-fade-in" style={{ animationDelay: "0.3s" }}>
-                和任何人的 AI 分身，围桌而谈
+                {/* Outer ambient glow — centered */}
+                <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-32 h-32 rounded-full bg-[#F4A261]/8 animate-campfire-glow" />
+
+                {/* Avatars sitting around the fire */}
+                {(() => {
+                  const count = Math.min(avatars.length, 6);
+                  const rx = 85;
+                  const ry = 70;
+                  const positions = Array.from({ length: count }, (_, i) => {
+                    const angle = (2 * Math.PI / count) * i - Math.PI / 2;
+                    return { x: Math.cos(angle) * rx, y: Math.sin(angle) * ry };
+                  });
+
+                  return !loading && avatars.length > 0 && (
+                    <>
+                      {avatars.slice(0, 6).map((a, i) => (
+                        <div
+                          key={a.id}
+                          className="absolute w-10 h-10 rounded-full overflow-hidden border-2 border-[#F4A261]/40 z-20 shadow-md shadow-black/20"
+                          style={{
+                            left: `calc(50% + ${positions[i].x}px - 20px)`,
+                            top: `calc(50% + ${positions[i].y}px - 20px)`,
+                            opacity: 0,
+                            animation: `fade-in-up 0.4s ease-out ${i * 0.12}s forwards, float 3s ease-in-out ${i * 0.5}s infinite`,
+                          }}
+                        >
+                          {a.avatar_url ? (
+                            <img src={a.avatar_url} alt={a.name} className="w-full h-full object-cover" />
+                          ) : (
+                            <div className="w-full h-full bg-[#F4A261]/15 flex items-center justify-center text-xs font-bold text-[#F4A261]/50">
+                              {a.name[0]}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                      <ChatBubbles avatarCount={count} avatarPositions={positions} />
+                    </>
+                  );
+                })()}
+              </div>
+
+              <h1 className="text-3xl font-bold mb-2 text-[#FFF8F0]/90 tracking-tight">分身篝火会</h1>
+              <p className="text-[#F4A261]/50 text-sm mb-1 opacity-0 animate-fade-in" style={{ animationDelay: "0.3s" }}>
+                围着篝火，和 AI 分身一起聊
               </p>
-              <p className="text-[#3D2C1E]/25 text-xs mb-10 opacity-0 animate-fade-in" style={{ animationDelay: "0.5s" }}>
-                产品决策 · 头脑风暴 · 甚至狼人杀
+              <p className="text-[#F4A261]/30 text-xs mb-10 opacity-0 animate-fade-in" style={{ animationDelay: "0.5s" }}>
+                圆桌闲聊 · 头脑风暴 · 成语接龙 · 甚至狼人杀
               </p>
 
               <a
                 href="/api/auth/login"
-                className="inline-block px-10 py-3.5 rounded-full bg-[#9B5DE5] text-white font-medium hover:bg-[#8a4dd4] transition-all shadow-lg shadow-[#9B5DE5]/25 hover:shadow-xl hover:shadow-[#9B5DE5]/30 hover:-translate-y-0.5"
+                className="inline-block px-10 py-3.5 rounded-full bg-[#F4A261] text-white font-medium hover:bg-[#e5934f] transition-all shadow-lg shadow-[#F4A261]/30 hover:shadow-xl hover:shadow-[#F4A261]/40 hover:-translate-y-0.5"
               >
-                进入议事厅
+                加入篝火
               </a>
-              <p className="text-[10px] text-[#3D2C1E]/15 mt-3">通过 SecondMe 账号登录</p>
+              <p className="text-[10px] text-[#FFF8F0]/15 mt-3">通过 SecondMe 账号登录</p>
             </div>
           ) : (
-            /* ── Logged-in: Create room ── */
+            /* ── Logged-in: Compact header only ── */
             <div>
-              {/* Compact avatar arc */}
-              <div className="relative w-36 h-16 mx-auto mb-4">
-                {avatars.slice(0, 4).map((a, i) => {
-                  const count = Math.min(avatars.length, 4);
-                  const angle = count > 1 ? (Math.PI / (count - 1)) * i : Math.PI / 2;
-                  const x = Math.cos(angle) * 50;
-                  const y = -Math.sin(angle) * 20;
-                  return (
-                    <div
-                      key={a.id}
-                      className="absolute w-9 h-9 rounded-full overflow-hidden border-2 border-white/60"
-                      style={{
-                        left: `calc(50% + ${x}px - 18px)`,
-                        top: `calc(50% + ${y}px - 18px)`,
-                        animation: `float 3s ease-in-out ${i * 0.5}s infinite${i % 2 === 0 ? ", speaking-glow-purple 2.5s ease-in-out infinite" : ""}`,
-                      }}
-                    >
-                      {a.avatar_url ? (
-                        <img src={a.avatar_url} alt={a.name} className="w-full h-full object-cover" />
-                      ) : (
-                        <div className="w-full h-full bg-[#9B5DE5]/15 flex items-center justify-center text-xs font-bold text-[#9B5DE5]/50">{a.name[0]}</div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-              <h1 className="text-3xl font-bold mb-1 text-[#3D2C1E] tracking-tight">分身议事</h1>
-              <p className="text-[#3D2C1E]/30 text-xs mb-6">输入话题，选择分身，开始讨论</p>
+              <h1 className="text-2xl font-bold mb-1 text-[#FFF8F0]/85 tracking-tight">分身篝火会</h1>
+              <p className="text-[#F4A261]/35 text-xs mb-2">围着篝火，和 AI 分身一起聊</p>
 
-              <div className="space-y-5">
+              <div className="space-y-3">
               {!joining ? (
                 <>
-                  <div className="space-y-3">
+                  {!showCreate ? (
+                    <button
+                      onClick={() => setShowCreate(true)}
+                      className="w-full py-3 rounded-2xl border-2 border-dashed border-[#F4A261]/15 text-[#F4A261]/40 text-sm hover:border-[#F4A261]/30 hover:text-[#F4A261]/60 transition-colors"
+                    >
+                      + 点燃新篝火
+                    </button>
+                  ) : (
+                  <div className="space-y-3 bg-white/5 rounded-2xl p-4 border border-[#F4A261]/8">
+                    <div className="flex items-center justify-between mb-1">
+                      <p className="text-[10px] text-[#F4A261]/40 font-medium">点燃新篝火</p>
+                      <button onClick={() => setShowCreate(false)} className="text-[#3D2C1E]/20 hover:text-[#3D2C1E]/50 text-sm">×</button>
+                    </div>
                     <input
                       type="text"
                       value={topic}
                       onChange={(e) => setTopic(e.target.value)}
-                      placeholder="今天聊什么？"
-                      className="w-full bg-white/60 border border-[#F4A261]/20 rounded-2xl px-5 py-3.5 text-[#3D2C1E] placeholder:text-[#3D2C1E]/25 outline-none focus:border-[#F4A261]/50 focus:bg-white/80 transition-all text-center shadow-sm"
+                      placeholder="今晚篝火聊什么？"
+                      className="w-full bg-white/8 border border-[#F4A261]/15 rounded-2xl px-5 py-3.5 text-[#FFF8F0]/80 placeholder:text-[#FFF8F0]/20 outline-none focus:border-[#F4A261]/40 focus:bg-white/12 transition-all text-center"
                       onFocus={() => setTopicFocused(true)}
                       onKeyDown={(e) => e.key === "Enter" && createRoom()}
                     />
 
                     {avatars.length > 0 && (topicFocused || topic.trim()) && (
-                      <div className="bg-white/30 rounded-2xl p-2.5 space-y-1.5 text-left max-h-40 overflow-y-auto">
-                        <p className="text-[10px] text-[#9B5DE5]/40 font-medium px-1">选择参会分身</p>
+                      <div className="bg-white/5 rounded-2xl p-2.5 space-y-1.5 text-left max-h-40 overflow-y-auto">
+                        <p className="text-[10px] text-[#F4A261]/35 font-medium px-1">选择参会分身</p>
                         {avatars.map((a) => (
                           <div
                             key={a.id}
@@ -452,7 +500,7 @@ export default function Home() {
                                 a.name[0]
                               )}
                             </div>
-                            <span className="text-xs text-[#3D2C1E]/50 flex-1 truncate">{a.name}</span>
+                            <span className="text-xs text-[#FFF8F0]/50 flex-1 truncate">{a.name}</span>
                             {a.likes > 0 && (
                               <span className="text-[10px] text-red-300/50">♥ {a.likes}</span>
                             )}
@@ -460,6 +508,34 @@ export default function Home() {
                         ))}
                       </div>
                     )}
+
+                    {/* Scene selector */}
+                    <div className="px-1">
+                      <p className="text-[10px] text-[#F4A261]/35 font-medium mb-1.5">场景</p>
+                      <div className="flex gap-2">
+                        {SCENE_LIST.map((s) => {
+                          const sc = SCENES[s];
+                          const isSelected = scene === s;
+                          return (
+                            <button
+                              key={s}
+                              onClick={() => previewScene(s)}
+                              className={`flex-1 py-2 rounded-xl text-[11px] transition-all border flex flex-col items-center gap-0.5 ${
+                                isSelected
+                                  ? "bg-[#9B5DE5]/12 border-[#9B5DE5]/30 text-[#FFF8F0]/60 scale-105"
+                                  : "bg-white/5 border-white/8 text-[#FFF8F0]/25 hover:text-[#FFF8F0]/40 hover:bg-white/8"
+                              }`}
+                            >
+                              <span className="text-base">{sc.emoji}</span>
+                              <span>{sc.label}</span>
+                              {isSelected && sc.audioSrc && (
+                                <span className="text-[8px] text-[#9B5DE5]/40">♪ 试听中</span>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
 
                     <div className="flex items-center px-1">
                       <button
@@ -480,16 +556,10 @@ export default function Home() {
                       disabled={!topic.trim() || creating}
                       className="w-full py-3.5 rounded-2xl bg-[#F4A261] text-white font-medium disabled:opacity-30 hover:bg-[#e5934f] transition-colors shadow-md shadow-[#F4A261]/20"
                     >
-                      {creating ? "创建中..." : `创建会议${selected.size > 0 ? ` (${selected.size} 个分身)` : ""}`}
+                      {creating ? "创建中..." : `${SCENES[scene].createLabel}${selected.size > 0 ? ` (${selected.size} 个分身)` : ""}`}
                     </button>
                   </div>
-
-                  <button
-                    onClick={() => setJoining(true)}
-                    className="text-[#3D2C1E]/25 text-sm hover:text-[#3D2C1E]/50 transition-colors"
-                  >
-                    加入已有会议
-                  </button>
+                  )}
                 </>
               ) : (
                 <div className="space-y-3">
@@ -521,145 +591,107 @@ export default function Home() {
           )}
         </div>
 
-        {/* Scroll hint */}
-        {user && rooms.length > 0 && (
-          <div className="absolute bottom-8 flex flex-col items-center animate-bounce-slow">
-            <span className="text-[#3D2C1E]/20 text-[10px] mb-1">发现更多讨论</span>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-[#3D2C1E]/15">
-              <polyline points="6 9 12 15 18 9" />
-            </svg>
-          </div>
-        )}
       </div>
 
-      {/* Room list section */}
-      {user && (
-        <div className="relative z-10 px-6 pb-16 -mt-4">
+      {/* Room list section — visible to everyone */}
+      {(user || publicRooms.length > 0) && (
+        <div className="relative z-10 px-6 pb-16">
           <div className="max-w-lg mx-auto">
             <div className="flex items-center gap-2 mb-4">
-              <div className="flex-1 h-px bg-[#3D2C1E]/6" />
+              <div className="flex-1 h-px bg-[#FFF8F0]/6" />
               <div className="flex items-center gap-1.5">
                 <button
                   onClick={() => setRoomTab("discover")}
-                  className={`text-[11px] font-medium px-2 py-0.5 rounded-full transition-colors ${roomTab === "discover" ? "bg-[#9B5DE5]/10 text-[#9B5DE5]/70" : "text-[#3D2C1E]/25 hover:text-[#3D2C1E]/40"}`}
+                  className={`text-[11px] font-medium px-2 py-0.5 rounded-full transition-colors ${roomTab === "discover" ? "bg-[#F4A261]/15 text-[#F4A261]/70" : "text-[#FFF8F0]/25 hover:text-[#FFF8F0]/40"}`}
                 >
                   发现
                 </button>
                 <button
                   onClick={() => setRoomTab("my")}
-                  className={`text-[11px] font-medium px-2 py-0.5 rounded-full transition-colors ${roomTab === "my" ? "bg-[#9B5DE5]/10 text-[#9B5DE5]/70" : "text-[#3D2C1E]/25 hover:text-[#3D2C1E]/40"}`}
+                  className={`text-[11px] font-medium px-2 py-0.5 rounded-full transition-colors ${roomTab === "my" ? "bg-[#F4A261]/15 text-[#F4A261]/70" : "text-[#FFF8F0]/25 hover:text-[#FFF8F0]/40"}`}
                 >
                   我的
                 </button>
               </div>
-              <div className="flex-1 h-px bg-[#3D2C1E]/6" />
+              <div className="flex-1 h-px bg-[#FFF8F0]/6" />
             </div>
 
             {(() => {
-              const filteredRooms = roomTab === "discover"
+              const filteredRooms = (roomTab === "discover"
                 ? publicRooms
                 : rooms.filter((room) => {
                     if (!user) return false;
                     return room.created_by === user.name || room.human_participants.some((h) => h.name === user.name);
-                  });
+                  })
+              ).sort((a, b) => (b.message_count ?? 0) - (a.message_count ?? 0));
 
-              if (roomsLoading) return <p className="text-[#3D2C1E]/20 text-xs text-center py-8">加载中...</p>;
-              if (filteredRooms.length === 0) return <p className="text-[#3D2C1E]/20 text-xs text-center py-8">{roomTab === "my" ? "还没有你参与的讨论" : "暂无公开讨论"}</p>;
+              if (roomsLoading) return <p className="text-[#FFF8F0]/20 text-xs text-center py-8">加载中...</p>;
+              if (filteredRooms.length === 0) return <p className="text-[#FFF8F0]/20 text-xs text-center py-8">{roomTab === "my" ? "还没有你参与的篝火" : "暂无公开篝火"}</p>;
 
               return (
-              <div className="space-y-2.5">
+              <div className="grid gap-3 sm:grid-cols-2">
                 {filteredRooms.map((room) => {
                   const isActive = room.status === "active" && !room.ended_at;
+                  const mc = room.message_count ?? 0;
+                  const allParticipants = [...room.avatar_participants, ...room.human_participants.map((h) => ({ id: h.name, name: h.name, avatar_url: h.avatar }))];
                   return (
                     <div
                       key={room.id}
                       onClick={isActive ? () => router.push(`/room/${room.id}`) : undefined}
-                      className={`backdrop-blur-sm rounded-2xl px-4 py-3.5 transition-all ${
+                      className={`rounded-2xl p-4 transition-all ${
                         isActive
-                          ? "bg-white/45 hover:bg-white/65 cursor-pointer group"
-                          : "bg-white/25 hover:bg-white/35 group"
+                          ? "bg-[#2a1f15]/70 border border-[#F4A261]/12 hover:border-[#F4A261]/30 hover:bg-[#2a1f15]/90 cursor-pointer group"
+                          : "bg-[#2a1f15]/30 border border-transparent opacity-50"
                       }`}
                     >
-                      {/* Top row: status + topic + CTA */}
-                      <div className="flex items-start gap-2.5 mb-2.5">
-                        <div className={`mt-1.5 shrink-0 w-2 h-2 rounded-full ${isActive ? "bg-emerald-400 shadow-sm shadow-emerald-400/50 animate-breathe" : "bg-[#3D2C1E]/15"}`} />
-                        <div className="flex-1 min-w-0">
-                          <h3 className={`text-sm font-medium truncate transition-colors ${isActive ? "text-[#3D2C1E]/75 group-hover:text-[#3D2C1E]" : "text-[#3D2C1E]/40"}`}>
-                            {room.topic}
-                          </h3>
-                          <div className="flex items-center gap-2 mt-0.5">
-                            <span className={`text-[10px] font-medium ${isActive ? "text-emerald-500/70" : "text-[#3D2C1E]/25"}`}>
-                              {isActive ? "进行中" : "已结束"}
-                            </span>
-                            <span className="text-[#3D2C1E]/12 text-[10px]">·</span>
-                            <span className="text-[10px] text-[#3D2C1E]/25">
-                              {timeAgo(room.started_at)}
-                            </span>
+                      {/* Participant avatars — big row */}
+                      <div className="flex -space-x-2 mb-3">
+                        {allParticipants.slice(0, 5).map((p, i) => (
+                          <div key={i} className="w-8 h-8 rounded-full border-2 border-[#1a120b] bg-[#F4A261]/10 flex items-center justify-center overflow-hidden shrink-0">
+                            {p.avatar_url ? (
+                              <img src={p.avatar_url} alt={p.name} className="w-full h-full object-cover" />
+                            ) : (
+                              <span className="text-[9px] font-bold text-[#F4A261]/50">{p.name[0]}</span>
+                            )}
                           </div>
-                        </div>
-                        {isActive ? (
-                          <span className="shrink-0 mt-0.5 px-2.5 py-1 rounded-full bg-[#9B5DE5]/10 text-[10px] font-medium text-[#9B5DE5]/70 group-hover:bg-[#9B5DE5]/15 group-hover:text-[#9B5DE5] transition-colors">
-                            继续
-                          </span>
-                        ) : (
-                          <button
-                            onClick={(e) => { e.stopPropagation(); router.push(`/replay/${room.id}`); }}
-                            className="shrink-0 mt-0.5 px-2.5 py-1 rounded-full bg-[#F4A261]/10 text-[10px] font-medium text-[#F4A261]/60 hover:bg-[#F4A261]/20 hover:text-[#F4A261] transition-colors"
-                          >
-                            回放
-                          </button>
+                        ))}
+                        {allParticipants.length > 5 && (
+                          <div className="w-8 h-8 rounded-full border-2 border-[#1a120b] bg-[#F4A261]/8 flex items-center justify-center shrink-0">
+                            <span className="text-[9px] text-[#FFF8F0]/30">+{allParticipants.length - 5}</span>
+                          </div>
                         )}
                       </div>
 
-                      {/* Participants */}
-                      <div className="flex items-center gap-3 pl-4.5">
-                        {/* Human participants */}
-                        {room.human_participants.length > 0 && (
-                          <div className="flex items-center gap-1">
-                            <div className="flex -space-x-1.5">
-                              {room.human_participants.map((h, i) => (
-                                <div key={i} className="w-5.5 h-5.5 rounded-full border border-white/80 bg-[#F4A261]/15 flex items-center justify-center overflow-hidden shrink-0">
-                                  {h.avatar ? (
-                                    <img src={h.avatar} alt={h.name} className="w-full h-full rounded-full object-cover" />
-                                  ) : (
-                                    <span className="text-[8px] font-bold text-[#F4A261]/60">{h.name[0]}</span>
-                                  )}
-                                </div>
-                              ))}
-                            </div>
-                            <span className="text-[10px] text-[#F4A261]/50 ml-0.5">
-                              {room.human_participants.map((h) => h.name).join("、")}
-                            </span>
+                      {/* Live voice wave */}
+                      {isActive && mc > 0 && (
+                        <div className="flex items-center gap-2 mb-2">
+                          <div className="voice-wave text-[#F4A261]/60">
+                            <span /><span /><span /><span /><span /><span /><span />
                           </div>
-                        )}
+                          <span className="text-[11px] text-[#F4A261]/50 font-medium">讨论中</span>
+                        </div>
+                      )}
 
-                        {room.human_participants.length > 0 && room.avatar_participants.length > 0 && (
-                          <div className="w-px h-3 bg-[#3D2C1E]/8" />
-                        )}
+                      {/* Topic */}
+                      <h3 className={`text-[15px] font-medium mb-1.5 leading-snug transition-colors ${isActive ? "text-[#FFF8F0]/80 group-hover:text-[#FFF8F0]" : "text-[#FFF8F0]/30"}`}>
+                        {room.topic}
+                      </h3>
 
-                        {/* AI participants */}
-                        {room.avatar_participants.length > 0 && (
-                          <div className="flex items-center gap-1">
-                            <div className="flex -space-x-1.5">
-                              {room.avatar_participants.slice(0, 4).map((a, i) => (
-                                <div key={i} className="w-5.5 h-5.5 rounded-full border border-white/80 bg-[#9B5DE5]/10 flex items-center justify-center overflow-hidden shrink-0">
-                                  {a.avatar_url ? (
-                                    <img src={a.avatar_url} alt={a.name} className="w-full h-full rounded-full object-cover" />
-                                  ) : (
-                                    <span className="text-[8px] font-bold text-[#9B5DE5]/50">{a.name[0]}</span>
-                                  )}
-                                </div>
-                              ))}
-                              {room.avatar_participants.length > 4 && (
-                                <div className="w-5.5 h-5.5 rounded-full border border-white/80 bg-[#9B5DE5]/8 flex items-center justify-center shrink-0">
-                                  <span className="text-[8px] text-[#9B5DE5]/40">+{room.avatar_participants.length - 4}</span>
-                                </div>
-                              )}
-                            </div>
-                            <span className="text-[10px] text-[#9B5DE5]/40 ml-0.5 truncate max-w-[120px]">
-                              {room.avatar_participants.map((a) => a.name).join("、")}
+                      {/* Meta row */}
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className={`text-xs ${isActive ? "" : "opacity-30 grayscale"}`}>🔥</span>
+                          <span className="text-[10px] text-[#FFF8F0]/25">{timeAgo(room.started_at)}</span>
+                          {mc > 0 && (
+                            <span className={`text-[10px] font-medium ${mc > 20 ? "text-[#E76F51]/70" : mc > 5 ? "text-[#F4A261]/55" : "text-[#FFF8F0]/25"}`}>
+                              {mc > 20 ? "热火朝天" : mc > 5 ? "讨论正酣" : `${mc} 条讨论`}
                             </span>
-                          </div>
+                          )}
+                        </div>
+                        {isActive && (
+                          <span className="px-3 py-1 rounded-full bg-[#F4A261]/15 text-[11px] font-medium text-[#F4A261]/70 group-hover:bg-[#F4A261]/25 group-hover:text-[#F4A261] transition-colors">
+                            加入
+                          </span>
                         )}
                       </div>
                     </div>

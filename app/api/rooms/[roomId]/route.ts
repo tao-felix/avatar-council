@@ -8,8 +8,8 @@ export async function GET(
   const { roomId } = await params;
   const sb = getServiceSupabase();
 
-  // Auto-end rooms older than 1 hour
-  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  // Auto-end rooms older than 24 hours
+  const oneHourAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
   await sb
     .from("rooms")
     .update({ status: "ended", ended_at: new Date().toISOString() })
