@@ -32,6 +32,7 @@ interface RoomInfo {
   ended_at: string | null;
   is_public: boolean;
   message_count?: number;
+  view_count?: number;
   avatar_participants: { id: string; name: string; avatar_url: string }[];
   human_participants: { name: string; avatar: string }[];
 }
@@ -623,7 +624,7 @@ export default function Home() {
                     if (!user) return false;
                     return room.created_by === user.name || room.human_participants.some((h) => h.name === user.name);
                   })
-              ).sort((a, b) => (b.message_count ?? 0) - (a.message_count ?? 0));
+              ).sort((a, b) => (b.view_count ?? 0) - (a.view_count ?? 0) || (b.message_count ?? 0) - (a.message_count ?? 0));
 
               if (roomsLoading) return <p className="text-[#FFF8F0]/20 text-xs text-center py-8">加载中...</p>;
               if (filteredRooms.length === 0) return <p className="text-[#FFF8F0]/20 text-xs text-center py-8">{roomTab === "my" ? "还没有你参与的篝火" : "暂无公开篝火"}</p>;
@@ -637,11 +638,11 @@ export default function Home() {
                   return (
                     <div
                       key={room.id}
-                      onClick={isActive ? () => router.push(`/room/${room.id}`) : undefined}
-                      className={`rounded-2xl p-4 transition-all ${
+                      onClick={() => router.push(isActive ? `/room/${room.id}` : `/replay/${room.id}`)}
+                      className={`rounded-2xl p-4 transition-all cursor-pointer group ${
                         isActive
-                          ? "bg-[#2a1f15]/70 border border-[#F4A261]/12 hover:border-[#F4A261]/30 hover:bg-[#2a1f15]/90 cursor-pointer group"
-                          : "bg-[#2a1f15]/30 border border-transparent opacity-50"
+                          ? "bg-[#2a1f15]/70 border border-[#F4A261]/12 hover:border-[#F4A261]/30 hover:bg-[#2a1f15]/90"
+                          : "bg-[#2a1f15]/40 border border-[#FFF8F0]/5 hover:border-[#FFF8F0]/10 hover:bg-[#2a1f15]/50 opacity-70 hover:opacity-85"
                       }`}
                     >
                       {/* Participant avatars — big row */}
@@ -682,17 +683,22 @@ export default function Home() {
                         <div className="flex items-center gap-2">
                           <span className={`text-xs ${isActive ? "" : "opacity-30 grayscale"}`}>🔥</span>
                           <span className="text-[10px] text-[#FFF8F0]/25">{timeAgo(room.started_at)}</span>
+                          {(room.view_count ?? 0) > 0 && (
+                            <span className="text-[10px] text-[#FFF8F0]/25">{room.view_count} 次围观</span>
+                          )}
                           {mc > 0 && (
                             <span className={`text-[10px] font-medium ${mc > 20 ? "text-[#E76F51]/70" : mc > 5 ? "text-[#F4A261]/55" : "text-[#FFF8F0]/25"}`}>
                               {mc > 20 ? "热火朝天" : mc > 5 ? "讨论正酣" : `${mc} 条讨论`}
                             </span>
                           )}
                         </div>
-                        {isActive && (
-                          <span className="px-3 py-1 rounded-full bg-[#F4A261]/15 text-[11px] font-medium text-[#F4A261]/70 group-hover:bg-[#F4A261]/25 group-hover:text-[#F4A261] transition-colors">
-                            加入
-                          </span>
-                        )}
+                        <span className={`px-3 py-1 rounded-full text-[11px] font-medium transition-colors ${
+                          isActive
+                            ? "bg-[#F4A261]/15 text-[#F4A261]/70 group-hover:bg-[#F4A261]/25 group-hover:text-[#F4A261]"
+                            : "bg-[#FFF8F0]/5 text-[#FFF8F0]/30 group-hover:bg-[#FFF8F0]/10 group-hover:text-[#FFF8F0]/50"
+                        }`}>
+                          {isActive ? "加入" : "回放"}
+                        </span>
                       </div>
                     </div>
                   );

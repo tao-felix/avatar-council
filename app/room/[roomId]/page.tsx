@@ -32,14 +32,27 @@ interface OrchestrateResponse {
 }
 
 function buildSystemPrompt(strategy: string, maxSentences: number): string {
-  const base = "你是一位会议参与者。根据对话上下文，分享你自己的观点和见解。像真人同事一样自然交流。";
+  const base = "你是一位会议参与者。根据对话上下文，分享你自己的观点和见解。像真人朋友聊天一样自然简洁，不要长篇大论。不要使用 markdown 格式（如加粗、斜体、列表符号等）。";
   switch (strategy) {
-    case "short_reply": return `${base}简短回应，最多${maxSentences}句。`;
-    case "deep_discuss": return `${base}深入分享你的想法，控制在${maxSentences}句以内。`;
-    case "ask_question": return `${base}提出你感兴趣的问题。最多${maxSentences}句。`;
-    case "summarize": return `${base}简要总结讨论，最多${maxSentences}句。`;
-    default: return `${base}控制在2-3句话。如果没有有价值的补充，回复 [PASS]。`;
+    case "short_reply": return `${base}用1句话简短回应，不超过${Math.min(maxSentences, 2)}句。`;
+    case "deep_discuss": return `${base}用2-3句分享核心观点，不超过${Math.min(maxSentences, 3)}句。`;
+    case "ask_question": return `${base}用1句话提问。`;
+    case "summarize": return `${base}1-2句总结。`;
+    default: return `${base}1-2句话。如果没有有价值的补充，回复 [PASS]。`;
   }
+}
+
+function stripMarkdownForTTS(text: string): string {
+  return text
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/\*(.+?)\*/g, '$1')
+    .replace(/__(.+?)__/g, '$1')
+    .replace(/_(.+?)_/g, '$1')
+    .replace(/~~(.+?)~~/g, '$1')
+    .replace(/`(.+?)`/g, '$1')
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/^[>\-*]\s+/gm, '')
+    .trim();
 }
 
 interface Message {
@@ -69,6 +82,7 @@ export default function RoomPage() {
   const [scene, setScene] = useState<SceneType>("campfire");
   const [sceneOpen, setSceneOpen] = useState(false);
   const [isSpectator, setIsSpectator] = useState(false);
+  const [showEntryChoice, setShowEntryChoice] = useState(false);
   const [hostName, setHostName] = useState<string | null>(null);
   const [otherHumans, setOtherHumans] = useState<{ name: string; avatar: string }[]>([]);
   const [addAiOpen, setAddAiOpen] = useState(false);
@@ -137,6 +151,7 @@ export default function RoomPage() {
   const autoTimerRef = useRef<NodeJS.Timeout | null>(null);
   const autoRoundCountRef = useRef(0);
   const MAX_AUTO_ROUNDS = 1;
+  const prefetchAbortRef = useRef<AbortController | null>(null);
   const recorderRef = useRef<AudioRecorder>(new AudioRecorder());
 
   const saveMessage = useCallback((msg: { sender_id: string; sender_name: string; sender_type: string; content: string; tts_audio_url?: string }) => {
@@ -163,6 +178,13 @@ export default function RoomPage() {
         let room = await fetch(`/api/rooms/${roomId}`).then((r) => r.json());
         if (!mountedRef.current) return;
         if (room.error) { setTopic("自由讨论"); return; }
+
+        // Ended room → redirect to replay
+        if (room.status === "ended" || room.ended_at) {
+          router.replace(`/replay/${roomId}`);
+          return;
+        }
+
         setTopic(room.topic || "自由讨论");
         setScene(room.scene || "campfire");
         setHostName(room.host_name || room.created_by || null);
@@ -217,6 +239,8 @@ export default function RoomPage() {
           setMessages(loaded);
           messagesRef.current = loaded;
           msgIdRef.current = loaded.length;
+          // Show entry choice if room has history (active but idle)
+          setShowEntryChoice(true);
         }
       })
       .catch(() => {});
@@ -260,6 +284,9 @@ export default function RoomPage() {
           setMessages([...messagesRef.current]);
           msgIdRef.current = Math.max(msgIdRef.current, msg.id);
 
+          // Auto-dismiss entry choice — someone is actively talking
+          setShowEntryChoice(false);
+
           // Play audio for messages from others (not self)
           const isSelf = msg.sender === currentUserName;
           if (!isSelf && !askingRef.current) {
@@ -282,7 +309,7 @@ export default function RoomPage() {
                     const ttsRes = await fetch("/api/tts", {
                       method: "POST",
                       headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({ text: sentence, avatarId: msg.senderId }),
+                      body: JSON.stringify({ text: stripMarkdownForTTS(sentence), avatarId: msg.senderId }),
                     });
                     const ttsData = await ttsRes.json();
                     const url = ttsData.data?.audioUrl || ttsData.data?.url;
@@ -358,226 +385,397 @@ export default function RoomPage() {
     }
   }, [topic, aiParticipants]);
 
+  // Silent prefetch: stream AI text + collect TTS URLs without touching UI
+  const prefetchAiResponse = useCallback(async (
+    ai: Participant,
+    systemPrompt: string,
+    prompt: string,
+    controller: AbortController,
+  ): Promise<{ fullText: string; ttsUrls: Record<number, string>; sessionId?: string } | null> => {
+    try {
+      const res = await fetch("/api/chat/stream", {
+        signal: controller.signal,
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: prompt,
+          sessionId: sessionMapRef.current[ai.id],
+          systemPrompt,
+          avatarId: ai.id,
+        }),
+      });
+      if (!res.ok || !res.body) return null;
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let fullText = "";
+      let buffer = "";
+      let ttsIdx = 0;
+      const ttsPromises: Promise<void>[] = [];
+      const ttsUrls: Record<number, string> = {};
+      let sessionId: string | undefined;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            const data = line.slice(6).trim();
+            if (data === "[DONE]") continue;
+            try {
+              const parsed = JSON.parse(data);
+              if (parsed.sessionId) sessionId = parsed.sessionId;
+              const chunk = parsed.choices?.[0]?.delta?.content || "";
+              if (chunk) {
+                fullText += chunk;
+                const currentSentences = splitIntoSentences(fullText);
+                while (ttsIdx < currentSentences.length - 1) {
+                  const capturedIdx = ttsIdx;
+                  const cleanText = stripMarkdownForTTS(currentSentences[capturedIdx]);
+                  const p = fetch("/api/tts", {
+                    signal: controller.signal,
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ text: cleanText, avatarId: ai.id }),
+                  })
+                    .then((r) => r.json())
+                    .then((ttsData) => {
+                      const url = ttsData.data?.audioUrl || ttsData.data?.url;
+                      if (url) ttsUrls[capturedIdx] = url;
+                    })
+                    .catch(() => {});
+                  ttsPromises.push(p);
+                  ttsIdx++;
+                }
+              }
+            } catch { /* skip */ }
+          }
+        }
+      }
+
+      // Last sentence TTS
+      const finalSentences = splitIntoSentences(fullText);
+      while (ttsIdx < finalSentences.length) {
+        const capturedIdx = ttsIdx;
+        const cleanText = stripMarkdownForTTS(finalSentences[capturedIdx]);
+        const p = fetch("/api/tts", {
+          signal: controller.signal,
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: cleanText, avatarId: ai.id }),
+        })
+          .then((r) => r.json())
+          .then((ttsData) => {
+            const url = ttsData.data?.audioUrl || ttsData.data?.url;
+            if (url) ttsUrls[capturedIdx] = url;
+          })
+          .catch(() => {});
+        ttsPromises.push(p);
+        ttsIdx++;
+      }
+
+      await Promise.all(ttsPromises);
+      if (fullText.trim() === "[PASS]" || fullText.trim() === "") return null;
+      return { fullText, ttsUrls, sessionId };
+    } catch {
+      return null;
+    }
+  }, []);
+
   // Shared: execute a round of AI responses given a plan
   const executeRound = useCallback(async (plan: OrchestrateResponse[], allMessages: Message[]): Promise<Message[]> => {
-      // Execute plan — each avatar speaks in order
-      for (const response of plan) {
-        if (response.strategy === "pass") continue;
+      // Filter to actionable items
+      const activePlan = plan.filter((r) => r.strategy !== "pass" && aiParticipants.some((a) => a.name === r.avatar_name));
+      console.log("[executeRound] plan:", plan.map(p => `${p.avatar_name}:${p.strategy}`), "activePlan:", activePlan.length, "aiParticipants:", aiParticipants.map(a => a.name));
+
+      // Prefetch state — reused across iterations
+      let prefetchResult: { fullText: string; ttsUrls: Record<number, string>; sessionId?: string } | null = null;
+      let prefetchForAiId: string | null = null;
+
+      for (let idx = 0; idx < activePlan.length; idx++) {
+        const response = activePlan[idx];
+        console.log(`[executeRound] idx=${idx} avatar=${response.avatar_name} mounted=${mountedRef.current} asking=${askingRef.current}`);
         if (!mountedRef.current || !askingRef.current) break;
 
         const ai = aiParticipants.find((a) => a.name === response.avatar_name);
-        if (!ai) continue;
+        if (!ai) { console.log("[executeRound] ai not found for", response.avatar_name); continue; }
 
         const systemPrompt = buildSystemPrompt(response.strategy, response.max_sentences);
 
-        // Fresh queue — old in-flight TTS promises will enqueue to the dead old queue
+        // Fresh queue
         audioQueueRef.current.stop();
         audioQueueRef.current = new AudioQueue();
 
         setActiveAiId(ai.id);
-        setActivePhase("thinking");
-        setAiStreamText("");
         setPlayingSentenceIdx(-1);
         setRevealedIdx(-1);
 
-        // Build context from ALL messages including previous AI replies in this round
-        const context = allMessages
-          .slice(-15)
-          .map((m) => `${m.sender}: ${m.text}`)
-          .join("\n");
+        const queue = audioQueueRef.current;
+        queue.onPlay = (idxVal) => {
+          setPlayingSentenceIdx(idxVal);
+          setRevealedIdx(idxVal);
+        };
 
-        // Tell the AI who already spoke in this round so it doesn't repeat
-        const alreadySpoke = plan
-          .slice(0, plan.indexOf(response))
-          .filter((r) => r.strategy !== "pass")
-          .map((r) => r.avatar_name);
-        const spokenNote = alreadySpoke.length > 0
-          ? `\n\n注意：在你之前，${alreadySpoke.join("、")}已经回应了（见上方对话）。不要重复他们说过的内容，也不要再把话题抛给他们。直接回应最新的讨论。`
-          : "";
+        let fullText = "";
+        const ttsUrls: Record<number, string> = {};
+        const ttsPromises: Promise<void>[] = [];
 
-        const prompt = `会议主题: ${topic}\n\n最近的对话:\n${context}${spokenNote}\n\n请根据以上对话自然参与讨论。`;
+        // --- Check if we have prefetched data for this AI ---
+        if (prefetchResult && prefetchForAiId === ai.id) {
+          fullText = prefetchResult.fullText;
+          Object.assign(ttsUrls, prefetchResult.ttsUrls);
+          if (prefetchResult.sessionId) sessionMapRef.current[ai.id] = prefetchResult.sessionId;
 
-        const controller = new AbortController();
-        abortRef.current = controller;
+          const sentences = splitIntoSentences(fullText);
+          sentencesRef.current = sentences;
+          setAiStreamText(fullText);
+          setActivePhase("playing");
 
-        try {
-          const res = await fetch("/api/chat/stream", {
-            signal: controller.signal,
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              message: prompt,
-              sessionId: sessionMapRef.current[ai.id],
-              systemPrompt,
-              avatarId: ai.id,
-            }),
+          // Enqueue all cached TTS URLs
+          Object.keys(ttsUrls).sort((a, b) => +a - +b).forEach((k) => {
+            queue.enqueue(ttsUrls[+k], +k);
           });
+          queue.startPlayback();
 
-          if (!res.ok || !res.body) {
-            setActiveAiId(null);
-            setActivePhase("idle");
-            continue;
-          }
-
-          // --- Pipelined: stream text + fire TTS as sentences complete ---
-          const reader = res.body.getReader();
-          const decoder = new TextDecoder();
-          let fullText = "";
-          let buffer = "";
-          let ttsIndex = 0;
-          const ttsPromises: Promise<void>[] = [];
-
-          const queue = audioQueueRef.current;
-          queue.onPlay = (idx) => {
-            setPlayingSentenceIdx(idx);
-            setRevealedIdx(idx); // reveal sentences up to current playing
-          };
-
-          const ttsUrls: Record<number, string> = {}; // index → url
-          const fireTTS = (sentence: string, index: number) => {
-            const p = fetch("/api/tts", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ text: sentence, avatarId: ai.id }),
-            })
-              .then((r) => r.json())
-              .then((ttsData) => {
-                const url = ttsData.data?.audioUrl || ttsData.data?.url;
-                if (url && mountedRef.current) {
-                  ttsUrls[index] = url;
-                  queue.enqueue(url, index);
-                  if (!queue.isPlaying()) {
-                    setActivePhase("playing");
-                    queue.startPlayback();
-                  }
-                }
-              })
-              .catch(() => {});
-            ttsPromises.push(p);
-          };
-
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split("\n");
-            buffer = lines.pop() || "";
-
-            for (const line of lines) {
-              if (line.startsWith("data: ")) {
-                const data = line.slice(6).trim();
-                if (data === "[DONE]") continue;
-                try {
-                  const parsed = JSON.parse(data);
-                  if (parsed.sessionId) sessionMapRef.current[ai.id] = parsed.sessionId;
-                  const chunk = parsed.choices?.[0]?.delta?.content || "";
-                  if (chunk) {
-                    fullText += chunk;
-                    setAiStreamText(fullText);
-                    setActivePhase("streaming");
-
-                    // Fire TTS for each newly completed sentence
-                    const currentSentences = splitIntoSentences(fullText);
-                    sentencesRef.current = currentSentences; // keep synced for reveal
-                    while (ttsIndex < currentSentences.length - 1) {
-                      fireTTS(currentSentences[ttsIndex], ttsIndex);
-                      ttsIndex++;
-                    }
-                  }
-                } catch { /* skip */ }
-              }
-            }
-          }
-
-          // Fire TTS for the last sentence
-          const finalSentences = splitIntoSentences(fullText);
-          while (ttsIndex < finalSentences.length) {
-            fireTTS(finalSentences[ttsIndex], ttsIndex);
-            ttsIndex++;
-          }
-          sentencesRef.current = finalSentences;
-
-          // Skip if PASS or empty
-          if (fullText.trim() === "[PASS]" || fullText.trim() === "") {
-            setActiveAiId(null);
-            setActivePhase("idle");
-            setAiStreamText("");
-            continue;
-          }
-
-          // Add message to list
-          const aiMsg: Message = {
-            id: ++msgIdRef.current,
-            senderId: ai.id,
-            sender: ai.name,
-            senderType: "ai",
-            text: fullText,
-            timestamp: Date.now(),
-          };
-          messagesRef.current = [...messagesRef.current, aiMsg];
-          setMessages(messagesRef.current);
-          allMessages = [...allMessages, aiMsg];
+          prefetchResult = null;
+          prefetchForAiId = null;
+        } else {
+          // --- Normal streaming path ---
+          setActivePhase("thinking");
           setAiStreamText("");
 
-          // Save text to DB first (TTS URLs come later via PATCH)
-          const saveRes = await fetch(`/api/rooms/${roomId}/messages`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ sender_id: ai.id, sender_name: ai.name, sender_type: "ai", content: fullText }),
-          }).then((r) => r.json()).catch(() => null);
-          const dbMsgId = saveRes?.id;
+          const context = allMessages
+            .slice(-15)
+            .map((m) => `${m.sender}: ${m.text}`)
+            .join("\n");
 
-          // Wait for all TTS requests to finish, then seal queue and wait for playback
-          await Promise.all(ttsPromises);
+          const alreadySpoke = activePlan
+            .slice(0, idx)
+            .map((r) => r.avatar_name);
+          const spokenNote = alreadySpoke.length > 0
+            ? `\n\n注意：在你之前，${alreadySpoke.join("、")}已经回应了（见上方对话）。不要重复他们说过的内容，也不要再把话题抛给他们。直接回应最新的讨论。`
+            : "";
 
-          // PATCH all TTS URLs as JSON array
-          const allUrls = Object.keys(ttsUrls).sort((a, b) => +a - +b).map((k) => ttsUrls[+k]);
-          if (allUrls.length > 0 && dbMsgId) {
-            const urlsJson = JSON.stringify(allUrls);
-            fetch(`/api/rooms/${roomId}/messages`, {
-              method: "PATCH",
+          const prompt = `会议主题: ${topic}\n\n最近的对话:\n${context}${spokenNote}\n\n请根据以上对话自然参与讨论。`;
+
+          const controller = new AbortController();
+          abortRef.current = controller;
+
+          try {
+            const res = await fetch("/api/chat/stream", {
+              signal: controller.signal,
+              method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ messageId: dbMsgId, tts_audio_url: urlsJson }),
-            }).catch(() => {});
-            // Update in-memory
-            aiMsg.ttsAudioUrl = urlsJson;
-            messagesRef.current = messagesRef.current.map((m) =>
-              m.id === aiMsg.id ? { ...m, ttsAudioUrl: urlsJson } : m
-            );
-            setMessages([...messagesRef.current]);
-          }
-
-          // Wait for all TTS to arrive, then wait for playback to finish
-          if (mountedRef.current && (queue.isPlaying() || queue.hasItems())) {
-            await new Promise<void>((resolve) => {
-              queue.onFinish = () => {
-                if (mountedRef.current) {
-                  setPlayingSentenceIdx(-1);
-                  setRevealedIdx(-1);
-                }
-                resolve();
-              };
-              queue.seal();
+              body: JSON.stringify({
+                message: prompt,
+                sessionId: sessionMapRef.current[ai.id],
+                systemPrompt,
+                avatarId: ai.id,
+              }),
             });
-          } else {
-            setPlayingSentenceIdx(-1);
-          }
 
-        } catch (err) {
-          if (err instanceof DOMException && err.name === "AbortError") {
-            // User stopped — don't reset activeAiId here, stopAI handles it
-          } else {
-            setActiveAiId(null);
-            setActivePhase("idle");
-            setAiStreamText("");
+            console.log(`[executeRound] chat/stream response: ${res.status} ok=${res.ok} hasBody=${!!res.body}`);
+            if (!res.ok || !res.body) {
+              const errText = await res.text().catch(() => "");
+              console.error(`[executeRound] chat/stream failed: ${res.status} ${errText}`);
+              setActiveAiId(null);
+              setActivePhase("idle");
+              continue;
+            }
+
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = "";
+            let ttsIndex = 0;
+
+            const fireTTS = (sentence: string, index: number) => {
+              const cleanText = stripMarkdownForTTS(sentence);
+              const p = fetch("/api/tts", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ text: cleanText, avatarId: ai.id }),
+              })
+                .then((r) => r.json())
+                .then((ttsData) => {
+                  const url = ttsData.data?.audioUrl || ttsData.data?.url;
+                  if (url && mountedRef.current) {
+                    ttsUrls[index] = url;
+                    queue.enqueue(url, index);
+                    if (!queue.isPlaying()) {
+                      setActivePhase("playing");
+                      queue.startPlayback();
+                    }
+                  }
+                })
+                .catch(() => {});
+              ttsPromises.push(p);
+            };
+
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split("\n");
+              buffer = lines.pop() || "";
+
+              for (const line of lines) {
+                if (line.startsWith("data: ")) {
+                  const data = line.slice(6).trim();
+                  if (data === "[DONE]") continue;
+                  try {
+                    const parsed = JSON.parse(data);
+                    if (parsed.sessionId) sessionMapRef.current[ai.id] = parsed.sessionId;
+                    const chunk = parsed.choices?.[0]?.delta?.content || "";
+                    if (chunk) {
+                      fullText += chunk;
+                      setAiStreamText(fullText);
+                      setActivePhase("streaming");
+
+                      const currentSentences = splitIntoSentences(fullText);
+                      sentencesRef.current = currentSentences;
+                      while (ttsIndex < currentSentences.length - 1) {
+                        fireTTS(currentSentences[ttsIndex], ttsIndex);
+                        ttsIndex++;
+                      }
+                    }
+                  } catch { /* skip */ }
+                }
+              }
+            }
+
+            // Fire TTS for the last sentence
+            const finalSentences = splitIntoSentences(fullText);
+            while (ttsIndex < finalSentences.length) {
+              fireTTS(finalSentences[ttsIndex], ttsIndex);
+              ttsIndex++;
+            }
+            sentencesRef.current = finalSentences;
+
+            console.log(`[executeRound] fullText(${fullText.length}): "${fullText.slice(0, 100)}" sentences: ${finalSentences.length} ttsIndex: ${ttsIndex}`);
+
+            // Skip if PASS or empty
+            if (fullText.trim() === "[PASS]" || fullText.trim() === "") {
+              console.log("[executeRound] PASS or empty, skipping");
+              setActiveAiId(null);
+              setActivePhase("idle");
+              setAiStreamText("");
+              continue;
+            }
+          } catch (err) {
+            console.error("[executeRound] streaming error:", err);
+            if (err instanceof DOMException && err.name === "AbortError") {
+              // User stopped
+            } else {
+              setActiveAiId(null);
+              setActivePhase("idle");
+              setAiStreamText("");
+            }
+            continue;
           }
         }
+
+        // --- Common path: save message + wait for playback ---
+        const aiMsg: Message = {
+          id: ++msgIdRef.current,
+          senderId: ai.id,
+          sender: ai.name,
+          senderType: "ai",
+          text: fullText,
+          timestamp: Date.now(),
+        };
+        messagesRef.current = [...messagesRef.current, aiMsg];
+        setMessages(messagesRef.current);
+        allMessages = [...allMessages, aiMsg];
+        setAiStreamText("");
+
+        // Save to DB
+        const saveRes = await fetch(`/api/rooms/${roomId}/messages`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sender_id: ai.id, sender_name: ai.name, sender_type: "ai", content: fullText }),
+        }).then((r) => r.json()).catch(() => null);
+        const dbMsgId = saveRes?.id;
+
+        await Promise.all(ttsPromises);
+
+        // PATCH TTS URLs
+        const allUrls = Object.keys(ttsUrls).sort((a, b) => +a - +b).map((k) => ttsUrls[+k]);
+        if (allUrls.length > 0 && dbMsgId) {
+          const urlsJson = JSON.stringify(allUrls);
+          fetch(`/api/rooms/${roomId}/messages`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ messageId: dbMsgId, tts_audio_url: urlsJson }),
+          }).catch(() => {});
+          aiMsg.ttsAudioUrl = urlsJson;
+          messagesRef.current = messagesRef.current.map((m) =>
+            m.id === aiMsg.id ? { ...m, ttsAudioUrl: urlsJson } : m
+          );
+          setMessages([...messagesRef.current]);
+        }
+
+        // --- Start prefetching next AI while current one plays ---
+        let prefetchPromise: Promise<{ fullText: string; ttsUrls: Record<number, string>; sessionId?: string } | null> | null = null;
+        if (idx + 1 < activePlan.length && mountedRef.current && askingRef.current) {
+          const nextResponse = activePlan[idx + 1];
+          const nextAi = aiParticipants.find((a) => a.name === nextResponse.avatar_name);
+          if (nextAi) {
+            const nextSystemPrompt = buildSystemPrompt(nextResponse.strategy, nextResponse.max_sentences);
+            const nextContext = allMessages
+              .slice(-15)
+              .map((m) => `${m.sender}: ${m.text}`)
+              .join("\n");
+            const nextAlreadySpoke = activePlan
+              .slice(0, idx + 1)
+              .map((r) => r.avatar_name);
+            const nextSpokenNote = `\n\n注意：在你之前，${nextAlreadySpoke.join("、")}已经回应了（见上方对话）。不要重复他们说过的内容，也不要再把话题抛给他们。直接回应最新的讨论。`;
+            const nextPrompt = `会议主题: ${topic}\n\n最近的对话:\n${nextContext}${nextSpokenNote}\n\n请根据以上对话自然参与讨论。`;
+
+            prefetchAbortRef.current = new AbortController();
+            prefetchPromise = prefetchAiResponse(nextAi, nextSystemPrompt, nextPrompt, prefetchAbortRef.current);
+          }
+        }
+
+        // Wait for playback to finish (prefetch runs concurrently)
+        if (mountedRef.current && (queue.isPlaying() || queue.hasItems())) {
+          await new Promise<void>((resolve) => {
+            queue.onFinish = () => {
+              if (mountedRef.current) {
+                setPlayingSentenceIdx(-1);
+                setRevealedIdx(-1);
+              }
+              resolve();
+            };
+            queue.seal();
+          });
+        } else {
+          setPlayingSentenceIdx(-1);
+        }
+
+        // Collect prefetch result (may already be done or still in progress)
+        if (prefetchPromise) {
+          prefetchResult = await prefetchPromise.catch(() => null);
+          prefetchForAiId = prefetchResult ? activePlan[idx + 1]?.avatar_name
+            ? aiParticipants.find((a) => a.name === activePlan[idx + 1]?.avatar_name)?.id || null
+            : null : null;
+        }
       }
+
+      // Cleanup prefetch if unused
+      if (prefetchAbortRef.current) {
+        prefetchAbortRef.current.abort();
+        prefetchAbortRef.current = null;
+      }
+
       // All avatars done
       setActiveAiId(null);
       setActivePhase("idle");
       return allMessages;
-  }, [aiParticipants, topic, saveMessage, roomId]);
+  }, [aiParticipants, topic, saveMessage, roomId, prefetchAiResponse]);
 
   // Human-triggered: respond to human message then resume auto-discuss
   const askAIs = useCallback(async (allMessages: Message[]) => {
@@ -658,6 +856,8 @@ export default function RoomPage() {
     askingRef.current = false;
     abortRef.current?.abort();
     abortRef.current = null;
+    prefetchAbortRef.current?.abort();
+    prefetchAbortRef.current = null;
     audioQueueRef.current.stop();
     audioQueueRef.current = new AudioQueue();
     setActiveAiId(null);
@@ -719,7 +919,7 @@ export default function RoomPage() {
           const res = await fetch("/api/tts", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text: sentences[i], avatarId: ai?.id || participantId }),
+            body: JSON.stringify({ text: stripMarkdownForTTS(sentences[i]), avatarId: ai?.id || participantId }),
           });
           const ttsData = await res.json();
           const url = ttsData.data?.audioUrl || ttsData.data?.url;
@@ -1232,7 +1432,7 @@ export default function RoomPage() {
                                     const res = await fetch("/api/tts", {
                                       method: "POST",
                                       headers: { "Content-Type": "application/json" },
-                                      body: JSON.stringify({ text: sentences[si], avatarId: msg.senderId }),
+                                      body: JSON.stringify({ text: stripMarkdownForTTS(sentences[si]), avatarId: msg.senderId }),
                                     });
                                     const ttsData = await res.json();
                                     const url = ttsData.data?.audioUrl || ttsData.data?.url;
@@ -1502,6 +1702,45 @@ export default function RoomPage() {
           </div>
         </div>
       )}
+      {/* Entry choice overlay — active room with history but idle */}
+      {showEntryChoice && (
+        <div className="fixed inset-0 z-[55] flex items-center justify-center" onClick={() => setShowEntryChoice(false)}>
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" />
+          <div
+            className="relative bg-[#2a1f15] rounded-3xl shadow-2xl max-w-xs w-full mx-6 p-7 animate-fade-in border border-[#F4A261]/10"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="text-center mb-6">
+              <div className="text-3xl mb-3">🔥</div>
+              <h3 className="text-lg font-bold text-[#FFF8F0]/85 mb-1">{topic}</h3>
+              <p className="text-[11px] text-[#FFF8F0]/30">{messages.length} 条讨论记录</p>
+            </div>
+            <div className="space-y-2.5">
+              <button
+                onClick={() => {
+                  setShowEntryChoice(false);
+                  // Trigger auto-discuss to resume conversation
+                  if (aiParticipants.length > 0) {
+                    autoRoundCountRef.current = 0;
+                    autoDiscussRef.current = true;
+                    autoTimerRef.current = setTimeout(() => runAutoRound(), 1500);
+                  }
+                }}
+                className="w-full py-3 rounded-2xl bg-[#F4A261] text-white font-medium hover:bg-[#e5934f] transition-colors shadow-lg shadow-[#F4A261]/20"
+              >
+                🔥 加入讨论
+              </button>
+              <button
+                onClick={() => router.push(`/replay/${roomId}`)}
+                className="w-full py-3 rounded-2xl bg-white/8 text-[#FFF8F0]/50 font-medium hover:bg-white/12 hover:text-[#FFF8F0]/70 transition-colors"
+              >
+                ▶ 回放对话
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Share sheet */}
       {shareOpen && (
         <ShareSheet

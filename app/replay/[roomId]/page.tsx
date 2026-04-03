@@ -217,16 +217,16 @@ export default function ReplayPage() {
 
   if (loading) {
     return (
-      <main className="min-h-screen bg-[#FEF3E2] flex items-center justify-center">
-        <p className="text-[#3D2C1E]/30 text-sm">Loading...</p>
+      <main className="min-h-screen bg-[#1a120b] flex items-center justify-center">
+        <p className="text-[#FFF8F0]/20 text-sm">加载中...</p>
       </main>
     );
   }
 
   if (!room) {
     return (
-      <main className="min-h-screen bg-[#FEF3E2] flex items-center justify-center">
-        <p className="text-[#3D2C1E]/40 text-sm">Room not found</p>
+      <main className="min-h-screen bg-[#1a120b] flex items-center justify-center">
+        <p className="text-[#FFF8F0]/30 text-sm">房间不存在</p>
       </main>
     );
   }
@@ -243,31 +243,31 @@ export default function ReplayPage() {
   };
 
   return (
-    <main className="h-screen w-screen overflow-hidden relative bg-[#FEF3E2]">
-      {/* Ambient — same as room */}
-      <div className="fixed inset-0 pointer-events-none">
-        <div className="absolute top-0 left-1/4 w-[400px] h-[400px] bg-[#9B5DE5]/4 rounded-full blur-[120px]" />
-        <div className="absolute top-1/4 right-1/4 w-[350px] h-[350px] bg-[#F4A261]/5 rounded-full blur-[100px]" />
-      </div>
+    <main className="h-screen w-screen overflow-hidden relative bg-[#1a120b]">
+      {/* Ambient glow */}
+      <div className="fixed inset-0 pointer-events-none z-0" style={{
+        background: `radial-gradient(ellipse 70% 55% at 50% 55%, rgba(244, 162, 97, 0.08) 0%, transparent 70%),
+          radial-gradient(ellipse at center, rgba(30, 22, 14, 0.3) 0%, rgba(20, 14, 8, 0.7) 100%)`,
+      }} />
 
-      {/* Topic bar — same as room */}
+      {/* Topic bar */}
       <div className="absolute top-0 left-0 right-0 z-20 px-5 py-3 flex items-start justify-between">
         <div>
-          <p className="text-[#3D2C1E]/60 text-sm font-medium">{room.topic}</p>
-          <p className="text-[#3D2C1E]/25 text-[10px]">
-            <span className="text-[#9B5DE5]/40 font-medium mr-1">REPLAY</span>
-            房间 {roomId} · {aiParticipants.length} 个分身
+          <p className="text-[#FFF8F0]/60 text-sm font-medium">{room.topic}</p>
+          <p className="text-[#FFF8F0]/20 text-[10px]">
+            <span className="text-[#F4A261]/40 font-medium mr-1">REPLAY</span>
+            {aiParticipants.length} 个分身 · {messages.length} 条讨论
           </p>
         </div>
         <button
           onClick={copyShareLink}
-          className="shrink-0 mt-0.5 px-2.5 py-1 rounded-full bg-white/50 hover:bg-white/70 text-[10px] text-[#3D2C1E]/40 font-medium transition-colors"
+          className="shrink-0 mt-0.5 px-2.5 py-1 rounded-full bg-white/8 hover:bg-white/15 text-[10px] text-[#FFF8F0]/40 font-medium transition-colors"
         >
-          {copied ? "Copied!" : "Share"}
+          {copied ? "已复制" : "分享"}
         </button>
       </div>
 
-      {/* AI participants — same layout as room */}
+      {/* AI participants */}
       <div className="absolute top-16 left-0 right-0 px-8" style={{ height: "55%" }}>
         <div className="relative w-full h-full">
           {aiParticipants.map((ai, i) => {
@@ -295,12 +295,11 @@ export default function ReplayPage() {
                     <span className="text-[#9B5DE5]/60">{ai.name[0]}</span>
                   )}
                 </div>
-                <span className="text-[10px] text-[#9B5DE5]/50 mt-1.5">{ai.name}</span>
+                <span className="text-[10px] text-[#9B5DE5]/40 mt-1.5">{ai.name}</span>
 
-                {/* Speech bubble — full content with scroll for long text */}
                 {latestMsg && (
-                  <div className={`mt-2 max-w-[320px] w-[280px] max-h-[200px] overflow-y-auto bg-white/60 backdrop-blur-sm rounded-2xl px-4 py-3 text-sm text-[#3D2C1E]/70 animate-fade-in leading-relaxed transition-all duration-300 ${
-                    isSpeaking ? "ring-1 ring-[#9B5DE5]/20" : ""
+                  <div className={`mt-2 max-w-[320px] w-[280px] max-h-[200px] overflow-y-auto bg-white/8 backdrop-blur-sm rounded-2xl px-4 py-3 text-sm text-[#FFF8F0]/60 animate-fade-in leading-relaxed transition-all duration-300 ${
+                    isSpeaking ? "ring-1 ring-[#9B5DE5]/30" : ""
                   }`}>
                     {latestMsg.content}
                   </div>
@@ -311,11 +310,10 @@ export default function ReplayPage() {
         </div>
       </div>
 
-      {/* Human area — supports multiple humans */}
+      {/* Human area */}
       <div className="absolute bottom-24 left-0 right-0 z-10 flex flex-col items-center">
-        {/* Human speech bubble */}
         {latestHumanMsg && (
-          <div className={`mb-4 max-w-[320px] max-h-[120px] overflow-y-auto bg-white/50 backdrop-blur-sm rounded-2xl px-4 py-2.5 text-sm text-[#3D2C1E]/60 animate-fade-in text-center transition-all duration-300 ${
+          <div className={`mb-4 max-w-[320px] max-h-[120px] overflow-y-auto bg-white/8 backdrop-blur-sm rounded-2xl px-4 py-2.5 text-sm text-[#FFF8F0]/50 animate-fade-in text-center transition-all duration-300 ${
             currentMsg?.sender_type === "human" ? "ring-1 ring-[#F4A261]/20" : ""
           }`}>
             {latestHumanMsg.content}
@@ -323,7 +321,6 @@ export default function ReplayPage() {
         )}
 
         <div className="flex items-center gap-4">
-          {/* Human avatars */}
           {humanParticipants.map((h) => {
             const isCurrentSpeaker = currentMsg?.sender_type === "human" && currentMsg?.sender_name === h.name;
             return (
@@ -346,25 +343,25 @@ export default function ReplayPage() {
           })}
 
           {humanParticipants.length === 1 && (
-            <span className="text-xs text-[#3D2C1E]/30">{humanParticipants[0].name}</span>
+            <span className="text-xs text-[#FFF8F0]/25">{humanParticipants[0].name}</span>
           )}
         </div>
 
         {currentIdx < 0 && messages.length > 0 && (
-          <p className="mt-3 text-[#3D2C1E]/15 text-[11px]">点击播放回放会议</p>
+          <p className="mt-3 text-[#FFF8F0]/15 text-[11px]">点击播放回放篝火</p>
         )}
       </div>
 
-      {/* Playback controls — fixed at bottom */}
+      {/* Playback controls */}
       {messages.length > 0 && (
         <div className="absolute bottom-0 left-0 right-0 z-20 px-5 pb-4 pt-2">
           <div className="max-w-2xl mx-auto">
-            {/* Progress track with avatar markers */}
+            {/* Progress track */}
             <div
               className="relative h-8 cursor-pointer group mb-2"
               onClick={handleProgressClick}
             >
-              <div className="absolute top-1/2 -translate-y-1/2 left-0 right-0 h-1 bg-[#3D2C1E]/8 rounded-full overflow-hidden">
+              <div className="absolute top-1/2 -translate-y-1/2 left-0 right-0 h-1 bg-[#FFF8F0]/8 rounded-full overflow-hidden">
                 <div
                   className="h-full bg-gradient-to-r from-[#9B5DE5]/40 to-[#F4A261]/40 rounded-full transition-all duration-300"
                   style={{ width: `${getProgress(currentIdx) * 100}%` }}
@@ -389,7 +386,7 @@ export default function ReplayPage() {
                       className="w-4 h-4 rounded-full overflow-hidden flex items-center justify-center"
                       style={{
                         border: `1.5px solid ${isHuman ? "#F4A261" : "#9B5DE5"}${isCurrent ? "" : "60"}`,
-                        backgroundColor: isCurrent ? "white" : `${isHuman ? "#F4A261" : "#9B5DE5"}10`,
+                        backgroundColor: isCurrent ? "#2a1f15" : `${isHuman ? "#F4A261" : "#9B5DE5"}10`,
                       }}
                     >
                       {avatarUrl ? (
@@ -405,14 +402,14 @@ export default function ReplayPage() {
               })}
             </div>
 
-            {/* Control bar: Previous | Play/Pause | Next | Speed | Counter */}
+            {/* Controls */}
             <div className="flex items-center justify-center gap-3">
               <button
                 onClick={goPrev}
                 disabled={currentIdx <= 0}
-                className="px-3 py-1.5 rounded-full bg-white/60 hover:bg-white/80 text-xs text-[#3D2C1E]/40 hover:text-[#3D2C1E]/70 font-medium transition-colors disabled:opacity-20 shadow-sm"
+                className="px-3 py-1.5 rounded-full bg-white/8 hover:bg-white/15 text-xs text-[#FFF8F0]/40 hover:text-[#FFF8F0]/60 font-medium transition-colors disabled:opacity-20"
               >
-                Previous
+                上一条
               </button>
 
               <button
@@ -421,7 +418,7 @@ export default function ReplayPage() {
                   w-10 h-10 rounded-full flex items-center justify-center transition-all duration-300 shadow-md
                   ${isPlaying
                     ? "bg-[#E76F51] text-white shadow-[#E76F51]/20"
-                    : "bg-white/80 text-[#3D2C1E]/50 hover:bg-white hover:text-[#3D2C1E]/70"
+                    : "bg-white/12 text-[#FFF8F0]/60 hover:bg-white/20 hover:text-[#FFF8F0]/80"
                   }
                 `}
               >
@@ -440,20 +437,20 @@ export default function ReplayPage() {
               <button
                 onClick={goNext}
                 disabled={currentIdx >= messages.length - 1}
-                className="px-3 py-1.5 rounded-full bg-white/60 hover:bg-white/80 text-xs text-[#3D2C1E]/40 hover:text-[#3D2C1E]/70 font-medium transition-colors disabled:opacity-20 shadow-sm"
+                className="px-3 py-1.5 rounded-full bg-white/8 hover:bg-white/15 text-xs text-[#FFF8F0]/40 hover:text-[#FFF8F0]/60 font-medium transition-colors disabled:opacity-20"
               >
-                Next
+                下一条
               </button>
 
               <button
                 onClick={() => setSpeed((s) => s >= 2 ? 0.5 : s + 0.5)}
-                className="px-2.5 py-1.5 rounded-full bg-white/50 hover:bg-white/70 text-[11px] text-[#3D2C1E]/35 font-medium transition-colors"
+                className="px-2.5 py-1.5 rounded-full bg-white/8 hover:bg-white/12 text-[11px] text-[#FFF8F0]/30 font-medium transition-colors"
               >
                 {speed}x
               </button>
 
-              <span className="text-[10px] text-[#3D2C1E]/20 ml-1">
-                {currentIdx >= 0 ? `${currentIdx + 1} / ${messages.length}` : `${messages.length} messages`}
+              <span className="text-[10px] text-[#FFF8F0]/15 ml-1">
+                {currentIdx >= 0 ? `${currentIdx + 1} / ${messages.length}` : `${messages.length} 条`}
               </span>
             </div>
           </div>

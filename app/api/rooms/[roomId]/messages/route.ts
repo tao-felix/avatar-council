@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase";
+import { reportHumanSpeech, reportAvatarSpeech } from "@/lib/agent-memory";
 
 export async function GET(
   _req: NextRequest,
@@ -48,6 +49,29 @@ export async function POST(
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
+
+  // Agent Memory: report speech event (fire-and-forget)
+  (async () => {
+    try {
+      const { data: room } = await sb.from("rooms").select("topic").eq("id", roomId).single();
+      const topic = room?.topic || "未知话题";
+      const msgId = String(data.id);
+
+      if (sender_type === "human") {
+        const smToken = req.cookies.get("sm_token")?.value;
+        console.log(`[agent-memory] human speech: token=${smToken ? "present" : "missing"}, msgId=${msgId}`);
+        if (smToken) {
+          await reportHumanSpeech(smToken, { roomId, topic, messageId: msgId, senderName: sender_name, content });
+        }
+      } else if (sender_type === "ai") {
+        const { data: avatar } = await sb.from("avatars").select("access_token").eq("id", sender_id).single();
+        if (avatar?.access_token) {
+          await reportAvatarSpeech(avatar.access_token, { roomId, topic, messageId: msgId, avatarName: sender_name, content });
+        }
+      }
+    } catch { /* agent memory reporting is non-critical */ }
+  })();
+
   return NextResponse.json(data);
 }
 

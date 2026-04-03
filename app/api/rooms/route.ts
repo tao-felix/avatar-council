@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase";
+import { reportRoomCreated } from "@/lib/agent-memory";
 
 export async function GET(req: NextRequest) {
   const sb = getServiceSupabase();
@@ -16,7 +17,7 @@ export async function GET(req: NextRequest) {
 
   let query = sb
     .from("rooms")
-    .select("id, topic, created_by, status, started_at, ended_at, is_public, avatar_participants, human_participants")
+    .select("id, topic, created_by, status, started_at, ended_at, is_public, avatar_participants, human_participants, view_count")
     .order("started_at", { ascending: false })
     .limit(50);
 
@@ -79,5 +80,16 @@ export async function POST(req: NextRequest) {
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
+
+  // Agent Memory: report room creation
+  const smToken = req.cookies.get("sm_token")?.value;
+  if (smToken) {
+    reportRoomCreated(smToken, {
+      roomId: id,
+      topic,
+      createdBy: createdBy || "Host",
+    }).catch(() => {});
+  }
+
   return NextResponse.json(data);
 }

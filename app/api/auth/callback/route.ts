@@ -54,7 +54,9 @@ export async function GET(req: NextRequest) {
       { httpOnly: false, maxAge: 86400 }
     );
     return response;
-  } catch {
-    return NextResponse.redirect(new URL("/?error=auth_failed", req.url));
+  } catch (err) {
+    console.error("[auth/callback] error:", err);
+    const detail = encodeURIComponent(String((err as Error).message || err).slice(0, 200));
+    return NextResponse.redirect(new URL(`/?error=auth_failed&detail=${detail}`, req.url));
   }
 }

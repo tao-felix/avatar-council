@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase";
+import { reportRoomEnded } from "@/lib/agent-memory";
 
 export async function GET(
   _req: NextRequest,
@@ -27,6 +28,10 @@ export async function GET(
   if (error || !data) {
     return NextResponse.json({ error: "Room not found" }, { status: 404 });
   }
+
+  // Increment view count (fire and forget)
+  Promise.resolve(sb.rpc("increment_view_count", { room_id: roomId })).catch(() => {});
+
   return NextResponse.json(data);
 }
 
@@ -47,5 +52,26 @@ export async function PATCH(
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
+
+  // Agent Memory: report room ended
+  if (body.status === "ended" && data) {
+    const smToken = req.cookies.get("sm_token")?.value;
+    if (smToken) {
+      (async () => {
+        try {
+          const { count } = await sb
+            .from("room_messages")
+            .select("id", { count: "exact", head: true })
+            .eq("room_id", roomId);
+          await reportRoomEnded(smToken, {
+            roomId,
+            topic: data.topic || "未知话题",
+            messageCount: count || 0,
+          });
+        } catch { /* agent memory reporting is non-critical */ }
+      })();
+    }
+  }
+
   return NextResponse.json(data);
 }
